@@ -1,0 +1,17 @@
+Guile-JPEG README
+
+
+Guile-JPEG is a JPEG toolkit for Guile.
+
+
+guile-jpeg 0.1.0 -- 2014-10-01
+==============================
+
+* Initial release.
+
+
+Copyright (C) 2014 Andy Wingo <wingo at pobox dot com>
+
+Copying and distribution of this file, with or without modification, are
+permitted in any medium without royalty provided the copyright notice
+and this notice are preserved.

@@ -1,0 +1,37 @@
+Guile-JPEG README
+Last updated 1 October 2014
+
+
+About Guile-JPEG
+================
+
+Guile-JPEG is a Scheme library to parse JPEG image files..
+
+
+Copying Guile-JPEG
+==================
+
+Distribution of Guile-Charting is under the LGPL. See the COPYING file
+for more information.
+
+
+Contact info
+============
+
+  Mailing List: guile-user@gnu.org
+
+
+Build dependencies
+==================
+
+Guile 2.0 or greater.
+
+
+Copying this file
+=================
+
+Copyright (C) 2014 Andy Wingo <wingo@pobox.com>
+
+Copying and distribution of this file, with or without modification, are
+permitted in any medium without royalty provided the copyright notice
+and this notice are preserved.
