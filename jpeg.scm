@@ -663,7 +663,11 @@
       ((exif ... sof)
        (let* ((header (read-frame-header port sof))
               (x (frame-header-x header))
-              (y (frame-header-y header)))
+              (y (frame-header-y header))
+              (exif (match exif
+                      (((main thumbnail)) main)
+                      (((main)) main)
+                      (_ '()))))
          (if (zero? y)
              (begin
                (discard-scan port)
