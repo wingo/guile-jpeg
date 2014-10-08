@@ -22,7 +22,7 @@ License along with this program.  If not, see
 
 AC_CONFIG_SRCDIR(jpeg.scm)
 AC_CONFIG_AUX_DIR([build-aux])
-AM_INIT_AUTOMAKE([-Wall -Wno-portability])
+AM_INIT_AUTOMAKE([-Wall -Wno-portability serial-tests])
 AM_SILENT_RULES([yes])
 
 GUILE_PKG([2.2 2.0])
