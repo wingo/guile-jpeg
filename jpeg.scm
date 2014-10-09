@@ -497,7 +497,7 @@
       (error "Bad TIFF header magic value"))
     (let ((ifd0 (bytevector-u32-ref bv 4 order)))
       ;; Root IFD -> embedded EXIF -> one more
-      (define *max-exif-depth* 2)
+      (define *max-exif-depth* 3)
       (parse-ifd-chain bv ifd0 order *max-exif-depth*))))
 
 
