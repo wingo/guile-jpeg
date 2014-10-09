@@ -56,7 +56,7 @@
     (40965 . 508)))
 
 (call-with-values (lambda ()
-                    (jpeg-metadata
+                    (jpeg-dimensions-and-exif
                      (string-append (getenv "GUILE_JPEG_TOP_SRCDIR")
                                     "/tests/imag0029.normal.jpg")))
   (lambda (width height exif)

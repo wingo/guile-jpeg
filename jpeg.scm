@@ -17,7 +17,7 @@
 
 ;;; Commentary:
 ;;
-;; A parser for the JPEG file format.
+;; A parser for EXIF and JPEG.
 ;;
 ;;; Code:
 
@@ -26,71 +26,15 @@
   #:use-module (srfi srfi-9)
   #:use-module (rnrs bytevectors)
   #:use-module (ice-9 match)
-  #:export (jpeg-dimensions
-            jpeg-metadata))
+  #:export (parse-exif
+            jpeg-dimensions
+            jpeg-dimensions-and-exif))
 
-;; See http://www.w3.org/Graphics/JPEG/itu-t81.pdf for ITU
-;; recommendation T.81, which is a freely-available version of the JPEG
-;; specification.
 
-;; JPEG := SOI FRAME EOI
-;; FRAME := MISC* FHEADER SCAN DNL? SCAN ... 
-;; SCAN := MISC* SHEADER ECS (RST ECS)*
-;; FHEADER := SOF LEN PRECISION Y X COMP0 COMP1 ...
-;; MISC := (DQT | DHT | DAC | DRI | COM | APP) LEN payload...
-;; SHEADER := SOS LEN NCOMPONENTS SCOMP0 SCOMP1 ... SS SE A
+
 
-(define (read-marker port)
-  (let ((u8 (get-u8 port)))
-    (unless (eqv? u8 #xff)
-      (error "Unexpected byte while reading marker" u8)))
-  (let lp ()
-    (let ((u8 (get-u8 port)))
-      (when (eof-object? u8)
-        (error "End of file while reading marker"))
-      (case u8
-        ((#xff) (lp))
-        ((0) (error "Expected a marker, got #xFF00"))
-        (else (logior #xff00 u8))))))
-
-(define (assert-marker port expected-marker)
-  (let ((marker (read-marker port)))
-    (unless (eqv? expected-marker marker)
-      (error "Unexpected marker" marker expected-marker))))
-
-(define (read-u8 port)
-  (let* ((u8 (get-u8 port)))
-    (when (eof-object? u8)
-      (error "EOF while reading byte from port"))
-    u8))
-
-(define (read-u16 port)
-  (let* ((msb (get-u8 port))
-         (lsb (get-u8 port)))
-    (when (eof-object? lsb)
-      (error "EOF while reading two-byte value"))
-    (logior (ash msb 8) lsb)))
-
-(define (read-soi port)
-  (assert-marker port #xffd8))
-
-(define (discard-misc-sequence port)
-  (let ((marker (read-marker port)))
-    (case marker
-      ((#xffdb ; DQT
-        #xffc4 ; DHT
-        #xffcc ; DAC
-        #xffdd ; DRI
-        #xfffe ; COM
-        #xffe0 #xffe1 #xffe2 #xffe3 #xffe4 #xffe5 #xffe6 #xffe7 ; APP0-APP7
-        #xffe8 #xffe9 #xffea #xffeb #xffec #xffed #xffee #xffef) ; APP8-APP15
-       (let* ((len (read-u16 port))
-              (payload-len (- len 2)))
-         (unless (>= payload-len 0)
-           (error "Invalid marker segment length" marker len))
-         (seek port payload-len SEEK_CUR)
-         (discard-misc-sequence port)))
-      (else marker))))
+;; Exif version 2.3:
+;; http://www.cipa.jp/std/documents/e/DC-008-2012_E.pdf
 
 (define *exif-tag-names* (make-hash-table))
 
@@ -561,6 +505,72 @@
     (let ((ifd0 (bytevector-u32-ref bv 4 order)))
       (parse-ifd-chain bv ifd0 order))))
 
+
+
+
+;; See http://www.w3.org/Graphics/JPEG/itu-t81.pdf for ITU
+;; recommendation T.81, which is a freely-available version of the JPEG
+;; specification.
+
+;; JPEG := SOI FRAME EOI
+;; FRAME := MISC* FHEADER SCAN DNL? SCAN ... 
+;; SCAN := MISC* SHEADER ECS (RST ECS)*
+;; FHEADER := SOF LEN PRECISION Y X COMP0 COMP1 ...
+;; MISC := (DQT | DHT | DAC | DRI | COM | APP) LEN payload...
+;; SHEADER := SOS LEN NCOMPONENTS SCOMP0 SCOMP1 ... SS SE A
+
+(define (read-marker port)
+  (let ((u8 (get-u8 port)))
+    (unless (eqv? u8 #xff)
+      (error "Unexpected byte while reading marker" u8)))
+  (let lp ()
+    (let ((u8 (get-u8 port)))
+      (when (eof-object? u8)
+        (error "End of file while reading marker"))
+      (case u8
+        ((#xff) (lp))
+        ((0) (error "Expected a marker, got #xFF00"))
+        (else (logior #xff00 u8))))))
+
+(define (assert-marker port expected-marker)
+  (let ((marker (read-marker port)))
+    (unless (eqv? expected-marker marker)
+      (error "Unexpected marker" marker expected-marker))))
+
+(define (read-u8 port)
+  (let* ((u8 (get-u8 port)))
+    (when (eof-object? u8)
+      (error "EOF while reading byte from port"))
+    u8))
+
+(define (read-u16 port)
+  (let* ((msb (get-u8 port))
+         (lsb (get-u8 port)))
+    (when (eof-object? lsb)
+      (error "EOF while reading two-byte value"))
+    (logior (ash msb 8) lsb)))
+
+(define (read-soi port)
+  (assert-marker port #xffd8))
+
+(define (discard-misc-sequence port)
+  (let ((marker (read-marker port)))
+    (case marker
+      ((#xffdb ; DQT
+        #xffc4 ; DHT
+        #xffcc ; DAC
+        #xffdd ; DRI
+        #xfffe ; COM
+        #xffe0 #xffe1 #xffe2 #xffe3 #xffe4 #xffe5 #xffe6 #xffe7 ; APP0-APP7
+        #xffe8 #xffe9 #xffea #xffeb #xffec #xffed #xffee #xffef) ; APP8-APP15
+       (let* ((len (read-u16 port))
+              (payload-len (- len 2)))
+         (unless (>= payload-len 0)
+           (error "Invalid marker segment length" marker len))
+         (seek port payload-len SEEK_CUR)
+         (discard-misc-sequence port)))
+      (else marker))))
+
 (define (extract-exif-from-misc-sequence port)
   (define (seek-and-continue offset)
     (seek port offset SEEK_CUR)
@@ -661,7 +671,7 @@
             (values x (read-dnl port)))
           (values x y)))))
 
-(define (jpeg-metadata file)
+(define (jpeg-dimensions-and-exif file)
   (let ((port (open-input-file file)))
     (read-soi port)
     (match (extract-exif-from-misc-sequence port)
