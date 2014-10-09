@@ -450,7 +450,7 @@
         (interpret value)
         value)))
 
-(define (parse-ifd-chain bv pos order)
+(define (parse-ifd-chain bv pos order max-depth)
   (define (inline-value? type count)
     (let ((byte-width (and (< type (vector-length *type-widths*))
                            (vector-ref *type-widths* type))))
@@ -469,8 +469,8 @@
                  (value (read-value bv offset order type count)))
             (if (and (eqv? tag #x8769) ;; Nested EXIF information.
                      (integer? value)
-                     (< (+ pos 2 (* tag-count 12)) value))
-                (match (parse-ifd-chain bv value order)
+                     (positive? max-depth))
+                (match (parse-ifd-chain bv value order (1- max-depth))
                   ((alist)
                    (append alist (lp (1+ n)))))
                 (let ((value* (interpret-value name value)))
@@ -481,9 +481,8 @@
          (next-pos (bytevector-u32-ref bv next-pos-offset order)))
     (cons (parse-tags tag-count)
           (cond
-           ((zero? next-pos) '())
-           ((<= next-pos-offset next-pos) (parse-ifd-chain bv next-pos order))
-           (else (error "Potentially circular IFD chain"))))))
+           ((or (zero? next-pos) (not (positive? max-depth))) '())
+           (else (parse-ifd-chain bv next-pos order (1- max-depth)))))))
 
 (define (parse-exif bv)
   (define (parse-byte-order b0 b1)
@@ -497,7 +496,9 @@
     (unless (= 42 (bytevector-u16-ref bv 2 order))
       (error "Bad TIFF header magic value"))
     (let ((ifd0 (bytevector-u32-ref bv 4 order)))
-      (parse-ifd-chain bv ifd0 order))))
+      ;; Root IFD -> embedded EXIF -> one more
+      (define *max-exif-depth* 2)
+      (parse-ifd-chain bv ifd0 order *max-exif-depth*))))
 
 
 
