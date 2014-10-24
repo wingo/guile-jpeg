@@ -11,7 +11,7 @@ Guile-JPEG is a Scheme library to parse JPEG image files..
 Copying Guile-JPEG
 ==================
 
-Distribution of Guile-Charting is under the LGPL. See the COPYING file
+Distribution of Guile-Charting is under the GPLv3+. See the COPYING file
 for more information.
 
 
