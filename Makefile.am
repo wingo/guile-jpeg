@@ -4,7 +4,8 @@ moddir=$(prefix)/share/guile/site/$(GUILE_EFFECTIVE_VERSION)
 godir=$(libdir)/guile/$(GUILE_EFFECTIVE_VERSION)/ccache
 
 SOURCES = \
-	jpeg.scm
+	jpeg.scm \
+	jpeg/exif.scm
 
 TESTS = 					\
 	tests/basic.scm
