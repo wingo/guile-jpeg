@@ -5,6 +5,7 @@ godir=$(libdir)/guile/$(GUILE_EFFECTIVE_VERSION)/ccache
 
 SOURCES = \
 	jpeg.scm \
+	jpeg/array.scm \
 	jpeg/exif.scm
 
 TESTS = 					\
