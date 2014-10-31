@@ -627,38 +627,39 @@
                         (else
                          (error "Unexpected marker" marker))))))))))))
 
-;; FIXME: eval-at-compile-time once guile master + arrays is working
 (define fdct-coefficients
-  (let ((pi (* 2 (acos 0))))
-    (array-unfold
-     (lambda (u v)
-       (typed-array-unfold
-        (lambda (k)
-          (call-with-values (lambda () (euclidean/ k 8))
-            (lambda (i j)
-              (let ((Cu (if (zero? u) (/ 1 (sqrt 2)) 1))
-                    (Cv (if (zero? v) (/ 1 (sqrt 2)) 1)))
-                (* 1/4 Cu Cv
-                   (cos (/ (* (+ (* 2 j) 1) u pi) 16))
-                   (cos (/ (* (+ (* 2 i) 1) v pi) 16)))))))
-        'f32 (list (* 8 8))))
-     (list 8 8))))
+  (eval-at-compile-time
+   (let ((pi (* 2 (acos 0))))
+     (array-unfold
+      (lambda (u v)
+        (typed-array-unfold
+         (lambda (k)
+           (call-with-values (lambda () (euclidean/ k 8))
+             (lambda (i j)
+               (let ((Cu (if (zero? u) (/ 1 (sqrt 2)) 1))
+                     (Cv (if (zero? v) (/ 1 (sqrt 2)) 1)))
+                 (* 1/4 Cu Cv
+                    (cos (/ (* (+ (* 2 j) 1) u pi) 16))
+                    (cos (/ (* (+ (* 2 i) 1) v pi) 16)))))))
+         'f32 (list (* 8 8))))
+      (list 8 8)))))
 
 (define idct-coefficients
-  (let ((pi (* 2 (acos 0))))
-    (array-unfold
-     (lambda (i j)
-       (typed-array-unfold
-        (lambda (k)
-          (call-with-values (lambda () (euclidean/ k 8))
-            (lambda (v u)
-              (let ((Cu (if (zero? u) (/ 1 (sqrt 2)) 1))
-                    (Cv (if (zero? v) (/ 1 (sqrt 2)) 1)))
-                (* 1/4 Cu Cv
-                   (cos (/ (* (+ (* 2 j) 1) u pi) 16))
-                   (cos (/ (* (+ (* 2 i) 1) v pi) 16)))))))
-        'f32 (list (* 8 8))))
-     (list 8 8))))
+  (eval-at-compile-time
+   (let ((pi (* 2 (acos 0))))
+     (array-unfold
+      (lambda (i j)
+        (typed-array-unfold
+         (lambda (k)
+           (call-with-values (lambda () (euclidean/ k 8))
+             (lambda (v u)
+               (let ((Cu (if (zero? u) (/ 1 (sqrt 2)) 1))
+                     (Cv (if (zero? v) (/ 1 (sqrt 2)) 1)))
+                 (* 1/4 Cu Cv
+                    (cos (/ (* (+ (* 2 j) 1) u pi) 16))
+                    (cos (/ (* (+ (* 2 i) 1) v pi) 16)))))))
+         'f32 (list (* 8 8))))
+      (list 8 8)))))
 
 (define (decode-block block plane pos stride)
   (define (idct i j)
