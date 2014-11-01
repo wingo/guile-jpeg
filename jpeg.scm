@@ -640,8 +640,8 @@
                (let ((Cu (if (zero? u) (/ 1 (sqrt 2)) 1))
                      (Cv (if (zero? v) (/ 1 (sqrt 2)) 1)))
                  (* 1/4 Cu Cv
-                    (cos (/ (* (+ (* 2 j) 1) u pi) 16))
-                    (cos (/ (* (+ (* 2 i) 1) v pi) 16)))))))
+                    (cos (/ (* (+ (* 2 i) 1) u pi) 16))
+                    (cos (/ (* (+ (* 2 j) 1) v pi) 16)))))))
          'f32 (list (* 8 8))))
       (list 8 8)))))
 
@@ -653,12 +653,12 @@
         (typed-array-unfold
          (lambda (k)
            (call-with-values (lambda () (euclidean/ k 8))
-             (lambda (v u)
+             (lambda (u v)
                (let ((Cu (if (zero? u) (/ 1 (sqrt 2)) 1))
                      (Cv (if (zero? v) (/ 1 (sqrt 2)) 1)))
                  (* 1/4 Cu Cv
-                    (cos (/ (* (+ (* 2 j) 1) u pi) 16))
-                    (cos (/ (* (+ (* 2 i) 1) v pi) 16)))))))
+                    (cos (/ (* (+ (* 2 i) 1) u pi) 16))
+                    (cos (/ (* (+ (* 2 j) 1) v pi) 16)))))))
          'f32 (list (* 8 8))))
       (list 8 8)))))
 
