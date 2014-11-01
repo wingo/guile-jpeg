@@ -1059,17 +1059,20 @@
 ;; are 255.
 (define (q-tables-for-quality quality)
   ;; This mapping of quality to a linear scale is also from libjpeg.
-  (let ((linear-scale (if (< quality 50)
-                          (/ 50. quality)
-                          (1- (/ quality 100.)))))
+  (let* ((quality (exact->inexact quality)) ;; allow divide by zero -> inf
+         (linear-scale (if (< quality 50)
+                           (/ 50. quality)
+                           (- 1 (/ (- quality 50) 50)))))
     (define (scale x)
-      (let ((scaled (* x linear-scale)))
+      (let ((x (* x linear-scale)))
         (cond
          ((< x 1) 1)
          ((> x 255) 255)
          (else (inexact->exact (round x))))))
-    (values (array-map-values scale *standard-luminance-q-table*)
-            (array-map-values scale *standard-chrominance-q-table*))))
+    (vector (array-map-values scale *standard-luminance-q-table*)
+            (array-map-values scale *standard-chrominance-q-table*)
+            #f
+            #f)))
 
 (define (q-tables-for-mcu-array mcu-array)
   (define (gcd* coeff q) (gcd (abs coeff) q))
@@ -1077,19 +1080,22 @@
     (if q
         (array-map-values gcd* coeffs q)
         (array-map-values abs coeffs)))
-  (array-fold-values
-   (lambda (mcu luma-q chroma-q)
-     (match mcu
-       (#(y)
-        (values (array-fold-values meet-tables y luma-q)
-                chroma-q))
-       (#(y u v)
-        (values (array-fold-values meet-tables y luma-q)
-                (let ((chroma-q (array-fold-values meet-tables u chroma-q)))
-                  (array-fold-values meet-tables v chroma-q))))))
-   mcu-array #f #f))
+  (call-with-values
+      (lambda ()
+        (array-fold-values
+         (lambda (mcu luma-q chroma-q)
+           (match mcu
+             (#(y)
+              (values (array-fold-values meet-tables y luma-q) chroma-q))
+             (#(y u v)
+              (values (array-fold-values meet-tables y luma-q)
+                      (let ((q (array-fold-values meet-tables u chroma-q)))
+                        (array-fold-values meet-tables v q))))))
+         mcu-array))
+    (lambda (luma-q chroma-q)
+      (vector luma-q chroma-q #f #f))))
 
-(define (encode-block plane pos stride)
+(define (encode-block plane pos stride q-table)
   (define (fdct v u)
     (let ((coeffs (array-ref fdct-coefficients v u)))
       (let lp ((i 0) (pos pos) (sum 0.0))
@@ -1109,11 +1115,17 @@
   (vector-unfold
    (lambda (k)
      (let ((v (ash k -3))
-           (u (logand k 7)))
-       (fdct v u)))
+           (u (logand k 7))
+           (q (vector-ref q-table k)))
+       (let ((Svu (fdct v u)))
+         (* q (inexact->exact (round (/ Svu q)))))))
    (* 8 8)))
 
-(define (encode-frame yuv)
+(define* (encode-frame yuv #:key (quality 85)
+                       (q-tables (q-tables-for-quality quality))
+                       (plane-q-table
+                        ;; Table 0 is for luminance, and 1 is for other components.
+                        (lambda (i) (if (zero? i) 0 1))))
   (match yuv
     (($ <yuv> width height canvas-width canvas-height planes)
      (define (x-subsampling plane) (/ canvas-width (plane-width plane)))
@@ -1124,29 +1136,32 @@
          (* samp-x (/ (plane-width plane) canvas-width)))
        (define (plane-samp-y plane)
          (* samp-y (/ (plane-height plane) canvas-height)))
-       (list
-        (make-frame #f 8 height width
-                    (array-unfold
-                     (lambda (i)
-                       (let* ((plane (vector-ref planes i))
-                              (samp-x (plane-samp-x plane))
-                              (samp-y (plane-samp-y plane)))
-                         (make-component i i samp-x samp-y #f)))
-                     (array-dimensions planes))
-                    samp-x samp-y)
-        '()
-        (array-unfold
-         (lambda (i j)
-           (array-map-values
-            (match-lambda
-             ((and plane ($ <plane> plane-width plane-height samples))
-              (let ((samp-y (plane-samp-y plane))
-                    (samp-x (plane-samp-x plane)))
-                (array-unfold
-                 (lambda (y x)
-                   (let ((pos (+ (* (+ (* i samp-y) y) 8 plane-width)
-                                 (* (+ (* j samp-x) x) 8))))
-                     (encode-block samples pos plane-width)))
-                 (list samp-y samp-x)))))
-            planes))
-         (list (/ canvas-height 8 samp-y) (/ canvas-width 8 samp-x))))))))
+       (let ((components
+              (array-unfold
+               (lambda (i)
+                 (let* ((plane (vector-ref planes i))
+                        (samp-x (plane-samp-x plane))
+                        (samp-y (plane-samp-y plane)))
+                   (make-component i i samp-x samp-y (plane-q-table i))))
+               (array-dimensions planes))))
+         (list
+          (make-frame #f 8 height width components samp-x samp-y)
+          '()
+          (array-unfold
+           (lambda (i j)
+             (array-map-values
+              (lambda (component)
+                (match (vector-ref planes (component-index component))
+                  (($ <plane> plane-width plane-height samples)
+                   (let ((samp-y (component-samp-y component))
+                         (samp-x (component-samp-x component)))
+                     (array-unfold
+                      (lambda (y x)
+                        (let* ((pos (+ (* (+ (* i samp-y) y) 8 plane-width)
+                                       (* (+ (* j samp-x) x) 8)))
+                               (q-table-index (component-q-table component))
+                               (q-table (vector-ref q-tables q-table-index)))
+                          (encode-block samples pos plane-width q-table)))
+                      (list samp-y samp-x))))))
+              components))
+           (list (/ canvas-height 8 samp-y) (/ canvas-width 8 samp-x)))))))))
