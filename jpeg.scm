@@ -1034,24 +1034,24 @@
 
 ;; Tables K.1 and K.2 from the JPEG specification.
 (define *standard-luminance-q-table*
-  #2((16 11 10 16 24 40 51 61)
-     (12 12 14 19 26 58 60 55)
-     (14 13 16 24 40 57 69 56)
-     (14 17 22 29 51 87 80 62)
-     (18 22 37 56 68 109 103 77)
-     (24 35 55 64 81 104 113 92)
-     (49 64 78 87 103 121 120 101)
-     (72 92 95 98 112 100 103 99)))
+  #(16 11 10 16 24 40 51 61
+    12 12 14 19 26 58 60 55
+    14 13 16 24 40 57 69 56
+    14 17 22 29 51 87 80 62
+    18 22 37 56 68 109 103 77
+    24 35 55 64 81 104 113 92
+    49 64 78 87 103 121 120 101
+    72 92 95 98 112 100 103 99))
 
 (define *standard-chrominance-q-table*
-  #2((17 18 24 47 99 99 99 99)
-     (18 21 26 66 99 99 99 99)
-     (24 26 56 99 99 99 99 99)
-     (47 66 99 99 99 99 99 99)
-     (99 99 99 99 99 99 99 99)
-     (99 99 99 99 99 99 99 99)
-     (99 99 99 99 99 99 99 99)
-     (99 99 99 99 99 99 99 99)))
+  #(17 18 24 47 99 99 99 99
+    18 21 26 66 99 99 99 99
+    24 26 56 99 99 99 99 99
+    47 66 99 99 99 99 99 99
+    99 99 99 99 99 99 99 99
+    99 99 99 99 99 99 99 99
+    99 99 99 99 99 99 99 99
+    99 99 99 99 99 99 99 99))
 
 ;; As libjpeg does, we consider the above tables to be quality 50, on a
 ;; scale from 1 (terrible) to 100 (great).  We linearly scale the values
@@ -1088,3 +1088,65 @@
                 (let ((chroma-q (array-fold-values meet-tables u chroma-q)))
                   (array-fold-values meet-tables v chroma-q))))))
    mcu-array #f #f))
+
+(define (encode-block plane pos stride)
+  (define (fdct v u)
+    (let ((coeffs (array-ref fdct-coefficients v u)))
+      (let lp ((i 0) (pos pos) (sum 0.0))
+        (if (< i 8)
+            (lp (1+ i)
+                (+ pos stride)
+                (let lp ((j 0) (k (* i 8)) (pos pos) (sum sum))
+                  (if (< j 8)
+                      (let ((coeff (f32vector-ref coeffs k))
+                            (sample (- (bytevector-u8-ref plane pos) 128)))
+                        (lp (1+ j)
+                            (1+ k)
+                            (1+ pos)
+                            (+ sum (* coeff sample))))
+                      sum)))
+            sum))))
+  (vector-unfold
+   (lambda (k)
+     (let ((v (ash k -3))
+           (u (logand k 7)))
+       (fdct v u)))
+   (* 8 8)))
+
+(define (encode-frame yuv)
+  (match yuv
+    (($ <yuv> width height canvas-width canvas-height planes)
+     (define (x-subsampling plane) (/ canvas-width (plane-width plane)))
+     (define (y-subsampling plane) (/ canvas-height (plane-height plane)))
+     (let ((samp-x (vector-fold* lcm 1 planes #:key x-subsampling))
+           (samp-y (vector-fold* lcm 1 planes #:key y-subsampling)))
+       (define (plane-samp-x plane)
+         (* samp-x (/ (plane-width plane) canvas-width)))
+       (define (plane-samp-y plane)
+         (* samp-y (/ (plane-height plane) canvas-height)))
+       (list
+        (make-frame #f 8 height width
+                    (array-unfold
+                     (lambda (i)
+                       (let* ((plane (vector-ref planes i))
+                              (samp-x (plane-samp-x plane))
+                              (samp-y (plane-samp-y plane)))
+                         (make-component i i samp-x samp-y #f)))
+                     (array-dimensions planes))
+                    samp-x samp-y)
+        '()
+        (array-unfold
+         (lambda (i j)
+           (array-map-values
+            (match-lambda
+             ((and plane ($ <plane> plane-width plane-height samples))
+              (let ((samp-y (plane-samp-y plane))
+                    (samp-x (plane-samp-x plane)))
+                (array-unfold
+                 (lambda (y x)
+                   (let ((pos (+ (* (+ (* i samp-y) y) 8 plane-width)
+                                 (* (+ (* j samp-x) x) 8))))
+                     (encode-block samples pos plane-width)))
+                 (list samp-y samp-x)))))
+            planes))
+         (list (/ canvas-height 8 samp-y) (/ canvas-width 8 samp-x))))))))
