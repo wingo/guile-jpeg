@@ -87,6 +87,37 @@
 (define (read-soi port)
   (assert-marker port #xffd8))
 
+(define-syntax eval-at-compile-time
+  (lambda (x)
+    (syntax-case x ()
+      ((eval-at-compile-time expr)
+       (datum->syntax #'eval-at-compile-time
+                      (primitive-eval (syntax->datum #'expr)))))))
+
+(define normal-order
+  (eval-at-compile-time
+   (let* ((width 8)
+          (height 8)
+          ;; The padding is to allow the 4-bit offsets in the AC
+          ;; coefficient decode loop to increment "k" beyond 63.
+          ;; Strictly speaking, at that point we should signal an error,
+          ;; but perhaps it's better to keep on trucking.  This trick
+          ;; was taken from libjpeg.
+          (padding 16)
+          (len (* width height))
+          (res (make-bytevector (+ len padding) (1- len))))
+     (let lp ((x 0) (y 0) (x-inc 1) (y-inc -1) (pos 0))
+       (when (< pos len)
+         (cond
+          ((< x 0) (lp 0 y (- x-inc) (- y-inc) pos))
+          ((< y 0) (lp x 0 (- x-inc) (- y-inc) pos))
+          ((and (< x width) (< y height))
+           (bytevector-u8-set! res pos (+ (* y height) x))
+           (lp (+ x x-inc) (+ y y-inc) x-inc y-inc (1+ pos)))
+          (else
+           (lp (+ x x-inc) (+ y y-inc) x-inc y-inc pos)))))
+     res)))
+
 (define (read-q-table port len q-tables)
   (unless (>= len 3)
     (error "Invalid DQT segment length" len))
@@ -94,6 +125,7 @@
          (Pq (ash PT -4))
          (Tq (logand PT #xf))
          (table (make-vector 64 #f)))
+    (define (zigzag->normal idx) (bytevector-u8-ref normal-order idx))
     (unless (< Tq 4)
       (error "Bad Tq value" Tq))
     (case Pq
@@ -102,14 +134,14 @@
          (error "Invalid DQT segment length" len))
        (let lp ((n 0))
          (when (< n 64)
-           (vector-set! table n (read-u8 port))
+           (vector-set! table (zigzag->normal n) (read-u8 port))
            (lp (1+ n)))))
       ((1)
        (unless (= len (+ 3 128))
          (error "Invalid DQT segment length" len))
        (let lp ((n 0))
          (when (< n 64)
-           (vector-set! table n (read-u16 port))
+           (vector-set! table (zigzag->normal n) (read-u16 port))
            (lp (1+ n)))))
       (else
        (error "Bad Pq value" Pq)))
@@ -423,43 +455,12 @@
         (else
          (lp (1+ size-idx) (+ (ash code 1) (read-bit bit-port)))))))))
 
-(define-syntax eval-at-compile-time
-  (lambda (x)
-    (syntax-case x ()
-      ((eval-at-compile-time expr)
-       (datum->syntax #'eval-at-compile-time
-                      (primitive-eval (syntax->datum #'expr)))))))
-
-(define normal-order
-  (eval-at-compile-time
-   (let* ((width 8)
-          (height 8)
-          ;; The padding is to allow the 4-bit offsets in the AC
-          ;; coefficient decode loop to increment "k" beyond 63.
-          ;; Strictly speaking, at that point we should signal an error,
-          ;; but perhaps it's better to keep on trucking.  This trick
-          ;; was taken from libjpeg.
-          (padding 16)
-          (len (* width height))
-          (res (make-bytevector (+ len padding) (1- len))))
-     (let lp ((x 0) (y 0) (x-inc 1) (y-inc -1) (pos 0))
-       (when (< pos len)
-         (cond
-          ((< x 0) (lp 0 y (- x-inc) (- y-inc) pos))
-          ((< y 0) (lp x 0 (- x-inc) (- y-inc) pos))
-          ((and (< x width) (< y height))
-           (bytevector-u8-set! res pos (+ (* y height) x))
-           (lp (+ x x-inc) (+ y y-inc) x-inc y-inc (1+ pos)))
-          (else
-           (lp (+ x x-inc) (+ y y-inc) x-inc y-inc pos)))))
-     res)))
-
 ;; return current dc
 (define (read-block bit-port block prev-dc-q q-table dc-table ac-table)
   (define (record! index quantized-coefficient)
-    (let ((q (vector-ref q-table index))
-          (normal-index (bytevector-u8-ref normal-order index)))
-      (vector-set! block normal-index (* quantized-coefficient q))))
+    (let* ((index (bytevector-u8-ref normal-order index))
+           (q (vector-ref q-table index)))
+      (vector-set! block index (* quantized-coefficient q))))
   ;; First, read DC coefficient.
   (let* ((dc-diff-bits (read-huffman-value bit-port dc-table))
          (dc-qdiff (read-signed-bits bit-port dc-diff-bits))
@@ -1031,3 +1032,59 @@
                (plane-width plane)
                (plane-height plane))))
 
+;; Tables K.1 and K.2 from the JPEG specification.
+(define *standard-luminance-q-table*
+  #2((16 11 10 16 24 40 51 61)
+     (12 12 14 19 26 58 60 55)
+     (14 13 16 24 40 57 69 56)
+     (14 17 22 29 51 87 80 62)
+     (18 22 37 56 68 109 103 77)
+     (24 35 55 64 81 104 113 92)
+     (49 64 78 87 103 121 120 101)
+     (72 92 95 98 112 100 103 99)))
+
+(define *standard-chrominance-q-table*
+  #2((17 18 24 47 99 99 99 99)
+     (18 21 26 66 99 99 99 99)
+     (24 26 56 99 99 99 99 99)
+     (47 66 99 99 99 99 99 99)
+     (99 99 99 99 99 99 99 99)
+     (99 99 99 99 99 99 99 99)
+     (99 99 99 99 99 99 99 99)
+     (99 99 99 99 99 99 99 99)))
+
+;; As libjpeg does, we consider the above tables to be quality 50, on a
+;; scale from 1 (terrible) to 100 (great).  We linearly scale the values
+;; so that at quality 100, all values are 1, and at quality 1 all values
+;; are 255.
+(define (q-tables-for-quality quality)
+  ;; This mapping of quality to a linear scale is also from libjpeg.
+  (let ((linear-scale (if (< quality 50)
+                          (/ 50. quality)
+                          (1- (/ quality 100.)))))
+    (define (scale x)
+      (let ((scaled (* x linear-scale)))
+        (cond
+         ((< x 1) 1)
+         ((> x 255) 255)
+         (else (inexact->exact (round x))))))
+    (values (array-map-values scale *standard-luminance-q-table*)
+            (array-map-values scale *standard-chrominance-q-table*))))
+
+(define (q-tables-for-mcu-array mcu-array)
+  (define (gcd* coeff q) (gcd (abs coeff) q))
+  (define (meet-tables coeffs q)
+    (if q
+        (array-map-values gcd* coeffs q)
+        (array-map-values abs coeffs)))
+  (array-fold-values
+   (lambda (mcu luma-q chroma-q)
+     (match mcu
+       (#(y)
+        (values (array-fold-values meet-tables y luma-q)
+                chroma-q))
+       (#(y u v)
+        (values (array-fold-values meet-tables y luma-q)
+                (let ((chroma-q (array-fold-values meet-tables u chroma-q)))
+                  (array-fold-values meet-tables v chroma-q))))))
+   mcu-array #f #f))

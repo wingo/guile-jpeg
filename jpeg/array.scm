@@ -26,7 +26,8 @@
             array-unfold
             array-fold
             array-fold-values
-            array-for-each-value)
+            array-for-each-value
+            array-map-values)
   #:replace (array-for-each))
 
 (define typed-array-unfold
@@ -153,3 +154,23 @@
 (define (array-for-each-value f array)
   (array-fold-values (lambda (x v) (f x) *unspecified*)
                      array *unspecified*))
+
+(define (array-map-values f array . arrays)
+  (array-unfold
+   (match arrays
+     (()
+      (match (array-rank array)
+        (1 (lambda (i) (f (array-ref array i))))
+        (2 (lambda (i j) (f (array-ref array i j))))
+        (_ (lambda dims (f (apply array-ref array dims))))))
+     ((array2)
+      (match (array-rank array)
+        (1 (lambda (i) (f (array-ref array i) (array-ref array2 i))))
+        (2 (lambda (i j) (f (array-ref array i j) (array-ref array2 i j))))
+        (_ (lambda dims (f (apply array-ref array dims)
+                           (apply array-ref array dims))))))
+     (arrays
+      (lambda dims
+        (apply f (map (lambda (array) (apply array-ref array dims))
+                      (cons array arrays))))))
+   (array-dimensions array)))
