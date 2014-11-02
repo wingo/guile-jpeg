@@ -662,7 +662,7 @@
          'f32 (list (* 8 8))))
       (list 8 8)))))
 
-(define (decode-block block plane pos stride)
+(define (idct-block block plane pos stride)
   (define (idct i j)
     (array-fold
      (lambda (k coeff sum)
@@ -726,7 +726,7 @@
                   (array-for-each
                    (lambda (i j block)
                      (let ((offset (+ offset (* i 8 sample-width) (* j 8))))
-                       (decode-block block plane offset sample-width)))
+                       (idct-block block plane offset sample-width)))
                    (vector-ref mcu k))))
               mcu-array)
              (make-plane sample-width sample-height plane)))
@@ -1091,11 +1091,13 @@
               (values (array-fold-values meet-tables y luma-q)
                       (let ((q (array-fold-values meet-tables u chroma-q)))
                         (array-fold-values meet-tables v q))))))
-         mcu-array))
+         mcu-array #f #f))
     (lambda (luma-q chroma-q)
-      (vector luma-q chroma-q #f #f))))
+      (define (fixup q) (if (zero? q) 255 q))
+      (vector (array-map-values fixup luma-q) (array-map-values fixup chroma-q)
+              #f #f))))
 
-(define (encode-block plane pos stride q-table)
+(define (fdct-block plane pos stride q-table)
   (define (fdct v u)
     (let ((coeffs (array-ref fdct-coefficients v u)))
       (let lp ((i 0) (pos pos) (sum 0.0))
@@ -1121,11 +1123,11 @@
          (* q (inexact->exact (round (/ Svu q)))))))
    (* 8 8)))
 
-(define* (encode-frame yuv #:key (quality 85)
-                       (q-tables (q-tables-for-quality quality))
-                       (plane-q-table
-                        ;; Table 0 is for luminance, and 1 is for other components.
-                        (lambda (i) (if (zero? i) 0 1))))
+(define* (fdct-frame yuv #:key (quality 85)
+                     (q-tables (q-tables-for-quality quality))
+                     ;; Table 0 is for luminance, and 1 is for other
+                     ;; components.
+                     (plane-q-table (lambda (i) (if (zero? i) 0 1))))
   (match yuv
     (($ <yuv> width height canvas-width canvas-height planes)
      (define (x-subsampling plane) (/ canvas-width (plane-width plane)))
@@ -1161,7 +1163,78 @@
                                        (* (+ (* j samp-x) x) 8)))
                                (q-table-index (component-q-table component))
                                (q-table (vector-ref q-tables q-table-index)))
-                          (encode-block samples pos plane-width q-table)))
+                          (fdct-block samples pos plane-width q-table)))
                       (list samp-y samp-x))))))
               components))
            (list (/ canvas-height 8 samp-y) (/ canvas-width 8 samp-x)))))))))
+
+(define (encode-block block q-table prev-dc)
+  (let ((zzq (vector-unfold
+              (lambda (i)
+                (let ((i (bytevector-u8-ref normal-order i)))
+                  (/ (vector-ref block i) (vector-ref q-table i))))
+              64)))
+    (define (bit-count x)
+      (cond
+       ((negative? x) (let lp ((n 1)) (if (< (ash -1 n) x) n (lp (1+ n)))))
+       ((zero? x) 0)
+       (else  (let lp ((n 1)) (if (< x (ash 1 n)) n (lp (1+ n)))))))
+    (define (code-and-bits code bits) (logior code (ash bits 8)))
+    (define (encode-dc dc) (code-and-bits (bit-count dc) dc))
+    (define (encode-ac ac zero-count)
+      (code-and-bits (logior (ash zero-count 4) (bit-count ac)) ac))
+    (define (skip-zeroes i zero-count codes)
+      (let ((ac (vector-ref zzq i)))
+        (if (zero? ac)
+            (if (= i 63)
+                (cons 0 codes) ;; EOB.
+                (skip-zeroes (1+ i) (1+ zero-count) codes))
+            (let lp ((zero-count zero-count) (codes codes))
+              (if (< zero-count 16)
+                  (encode-next (1+ i)
+                               (cons (encode-ac ac zero-count) codes))
+                  (lp (- zero-count 16) (cons #xf0 codes))))))) ; ZRL.
+    (define (encode-next i codes)
+      (if (= i 64)
+          codes
+          (skip-zeroes i 0 codes)))
+    (let ((dc (vector-ref zzq 0)))
+      (values dc
+              (cons (encode-dc (- dc prev-dc))
+                    (reverse (encode-next 1 '())))))))
+
+(define (encode-frame parsed)
+  (define (compute-scan-components frame mcu-array)
+    (let ((q-tables (q-tables-for-mcu-array mcu-array)))
+      (array-map-values
+       (lambda (component)
+         (let ((q-table (vector-ref q-tables (component-q-table component))))
+           ;; We don't know the dc and ac huffman tables yet.
+           (vector component 0 q-table #f #f)))
+       (frame-components frame))))
+  (match parsed
+    ((frame misc mcu-array)
+     (let ((scan-components (compute-scan-components frame mcu-array)))
+       (array-map-values
+        (lambda (mcu)
+          (array-map-values
+           (lambda (blocks scan-component)
+             (match scan-component
+               (#(component prev-dc q-table dc-table ac-table)
+                (call-with-values
+                    (lambda ()
+                      (array-fold-values
+                       (lambda (block dc out)
+                         (call-with-values (lambda ()
+                                             (encode-block block q-table dc))
+                           (lambda (dc codes)
+                             (values dc (cons codes out)))))
+                       blocks 0 '()))
+                  (lambda (dc out)
+                    (vector-set! scan-component 1 dc)
+                    (reverse out))))))
+           mcu
+           scan-components))
+        mcu-array)))))
+
+;; todo: derive a huffman code, write out jpeg.
