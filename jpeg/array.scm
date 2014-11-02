@@ -27,6 +27,7 @@
             array-fold
             array-fold-values
             array-for-each-value
+            array-map
             array-map-values)
   #:replace (array-for-each))
 
@@ -155,6 +156,29 @@
   (array-fold-values (lambda (x v) (f x) *unspecified*)
                      array *unspecified*))
 
+(define (array-map f array . arrays)
+  (array-unfold
+   (match arrays
+     (()
+      (match (array-rank array)
+        (1 (lambda (i) (f i (array-ref array i))))
+        (2 (lambda (i j) (f i j (array-ref array i j))))
+        (_ (lambda dims (apply f (append dims (apply array-ref array dims)))))))
+     ((array2)
+      (match (array-rank array)
+        (1 (lambda (i) (f i (array-ref array i) (array-ref array2 i))))
+        (2 (lambda (i j) (f i j (array-ref array i j) (array-ref array2 i j))))
+        (_ (lambda dims (apply f (append dims
+                                         (cons
+                                          (apply array-ref array dims)
+                                          (apply array-ref array2 dims))))))))
+     (arrays
+      (lambda dims
+        (apply f (append dims
+                         (map (lambda (array) (apply array-ref array dims))
+                              (cons array arrays)))))))
+   (array-dimensions array)))
+
 (define (array-map-values f array . arrays)
   (array-unfold
    (match arrays
@@ -168,7 +192,7 @@
         (1 (lambda (i) (f (array-ref array i) (array-ref array2 i))))
         (2 (lambda (i j) (f (array-ref array i j) (array-ref array2 i j))))
         (_ (lambda dims (f (apply array-ref array dims)
-                           (apply array-ref array dims))))))
+                           (apply array-ref array2 dims))))))
      (arrays
       (lambda dims
         (apply f (map (lambda (array) (apply array-ref array dims))
