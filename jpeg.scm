@@ -1213,15 +1213,14 @@
               (cons (encode-dc (- dc prev-dc))
                     (reverse (encode-next 1 '())))))))
 
-(define (encode-frame parsed)
+(define (encode-frame parsed q-tables)
   (define (compute-scan-components frame mcu-array)
-    (let ((q-tables (q-tables-for-mcu-array mcu-array)))
-      (array-map-values
-       (lambda (component)
-         (let ((q-table (vector-ref q-tables (component-q-table component))))
-           ;; We don't know the dc and ac huffman tables yet.
-           (vector component 0 q-table #f #f)))
-       (frame-components frame))))
+    (array-map-values
+     (lambda (component)
+       (let ((q-table (vector-ref q-tables (component-q-table component))))
+         ;; We don't know the dc and ac huffman tables yet.
+         (vector component 0 q-table #f #f)))
+     (frame-components frame)))
   (match parsed
     ((frame misc mcu-array)
      (let ((scan-components (compute-scan-components frame mcu-array)))
@@ -1239,7 +1238,7 @@
                                              (encode-block block q-table dc))
                            (lambda (dc codes)
                              (values dc (cons codes out)))))
-                       blocks 0 '()))
+                       blocks prev-dc '()))
                   (lambda (dc out)
                     (vector-set! scan-component 1 dc)
                     (reverse out))))))
@@ -1247,4 +1246,326 @@
            scan-components))
         mcu-array)))))
 
-;; todo: derive a huffman code, write out jpeg.
+(define (compute-code-frequencies codes)
+  (let ((dc-freqs (vector (make-vector 256 0) (make-vector 256 0) #f #f))
+        (ac-freqs (vector (make-vector 256 0) (make-vector 256 0) #f #f)))
+    (define (count! table code)
+      (let ((idx (logand code #xff)))
+        (vector-set! table idx (1+ (vector-ref table idx)))))
+    (define (accumulate-frequencies codes idx)
+      (let ((dc-freqs (vector-ref dc-freqs idx))
+            (ac-freqs (vector-ref ac-freqs idx)))
+        (match codes
+          ((dc . ac)
+           (count! dc-freqs dc)
+           (for-each (lambda (ac) (count! ac-freqs ac)) ac)))))
+    (array-for-each-value
+     (lambda (mcu)
+       (vector-for-each
+        (lambda (k blocks)
+          (for-each
+           (lambda (codes)
+             (let ((idx (if (zero? k) 0 1)))
+               (accumulate-frequencies codes idx)))
+           blocks))
+        mcu))
+     codes)
+    (vector dc-freqs ac-freqs)))
+
+(define (vector-inc! v idx addend)
+  (vector-set! v idx (+ (vector-ref v idx) addend)))
+
+(define (compute-huffman-code-sizes-for-freqs freqs)
+  (let ((sizes (make-bytevector 257 0))
+        (others (make-vector 257 #f))
+        (max-size 0))
+    (define (inc-size! code)
+      (let ((size (1+ (bytevector-u8-ref sizes code))))
+        (bytevector-u8-set! sizes code size)
+        (when (< max-size size)
+          (set! max-size size))))
+    (define (find-least-idx)
+      (let lp ((i 0) (least-idx #f))
+        (if (< i 257)
+            (lp (1+ i)
+                (let ((x (vector-ref freqs i)))
+                  (cond ((zero? x) least-idx)
+                        ((not least-idx) i)
+                        ((<= x (vector-ref freqs least-idx)) i)
+                        (else least-idx))))
+            least-idx)))
+    (define (find-next-least least-idx)
+      (let lp ((i 0) (next-least-idx #f))
+        (if (< i 257)
+            (lp (1+ i)
+                (let ((x (vector-ref freqs i)))
+                  (cond ((zero? x) next-least-idx)
+                        ((= i least-idx) next-least-idx)
+                        ((not next-least-idx) i)
+                        ((<= x (vector-ref freqs next-least-idx)) i)
+                        (else next-least-idx))))
+            next-least-idx)))
+    (let lp ((v1 256))
+      (cond
+       ((find-next-least v1)
+        => (lambda (v2)
+             (vector-inc! freqs v1 (vector-ref freqs v2))
+             (vector-set! freqs v2 0)
+             (let lp ((v1 v1))
+               (inc-size! v1)
+               (cond
+                ((vector-ref others v1) => lp)
+                (else
+                 (vector-set! others v1 v2)
+                 (let lp ((v2 v2))
+                   (inc-size! v2)
+                   (cond
+                    ((vector-ref others v2) => lp))))))
+             (lp (find-least-idx))))
+       (else (values sizes max-size))))))
+
+(define (compute-huffman-table-for-freqs freqs)
+  (define (bytevector-truncate bv len)
+    (if (< len (bytevector-length bv))
+        (let ((bv* (make-bytevector len)))
+          (bytevector-copy! bv 0 bv* 0 len)
+          bv*)
+        bv))
+  (call-with-values (lambda ()
+                      (let ((copy (make-vector 257)))
+                        (vector-copy! copy 0 freqs)
+                        ;; Add dummy entry.
+                        (vector-set! copy 256 1)
+                        (compute-huffman-code-sizes-for-freqs copy)))
+    (lambda (sizes max-size)
+      (let ((size-counts (make-bytevector (max max-size 16) 0)))
+        (define (inc-size-count! size n)
+          (bytevector-u8-set! size-counts size
+                              (+ (bytevector-u8-ref size-counts size) n)))
+        (let count-bits ((i 0))
+          (when (< i 257)
+            (let ((size (bytevector-u8-ref sizes i)))
+              (unless (zero? size)
+                (inc-size-count! (1- size) 1)))
+            (count-bits (1+ i))))
+        (let adjust-bits ((i (1- max-size)))
+          (cond
+           ((zero? (bytevector-u8-ref size-counts i))
+            (adjust-bits (1- i)))
+           ((< i 16)
+            ;; We're done.  Remove the dummy entry.
+            (inc-size-count! i -1))
+           (else
+            ;; We have a code that is > 16 bits long.  Reshuffle the
+            ;; tree to fit the code into 16 bits.
+            (let lp ((j (1- i)))
+              (cond
+               ((zero? (bytevector-u8-ref size-counts j))
+                (lp (1- j)))
+               (else
+                (inc-size-count! i -2)
+                (inc-size-count! (1- i) 1)
+                (inc-size-count! (1+ j) 2)
+                (inc-size-count! j -1))))
+            (adjust-bits i))))
+        ;; Sort values, then compute codes.
+        (let* ((count (array-fold-values + size-counts 0))
+               (values (make-bytevector count 0)))
+          (let visit-size ((size 1) (k 0))
+            (when (<= size max-size)
+              (let visit-values ((j 0) (k k))
+                (cond
+                 ((= j 256)
+                  (visit-size (1+ size) k))
+                 ((= (bytevector-u8-ref sizes j) size)
+                  (bytevector-u8-set! values k j)
+                  (visit-values (1+ j) (1+ k)))
+                 (else
+                  (visit-values (1+ j) k))))))
+          (compute-huffman-codes (bytevector-truncate size-counts 16)
+                                 values))))))
+
+(define (compute-huffman-code-tables dc-and-ac-freqs)
+  (array-map-values
+   (lambda (freqs-v)
+     (array-map-values
+      (lambda (freqs)
+        (and=> freqs compute-huffman-table-for-freqs))
+      freqs-v))
+   dc-and-ac-freqs))
+
+(define (put-u16 port u16)
+  (put-u8 port (ash u16 -8))
+  (put-u8 port (logand u16 #xff)))
+
+(define (write-soi port)
+  (put-u16 port #xffd8)) ; SOI.
+
+(define (write-misc-segment port misc)
+  (put-u16 port (misc-marker misc))
+  (put-u16 port (+ 2 (bytevector-length (misc-bytes misc))))
+  (put-bytevector port (misc-bytes misc)))
+
+(define (write-baseline-frame port frame)
+  (put-u16 port #xffc0) ; SOF0.
+  (let ((len (+ 8 (* (frame-component-count frame) 3))))
+    (put-u16 port len))
+  (put-u8 port (frame-precision frame))
+  (put-u16 port (frame-y frame))
+  (put-u16 port (frame-x frame))
+  (put-u8 port (frame-component-count frame))
+  (array-for-each-value
+   (lambda (component)
+     (put-u8 port (component-id component))
+     (put-u8 port (logior (ash (component-samp-y component) 4)
+                          (component-samp-x component)))
+     (put-u8 port (component-q-table component)))
+   (frame-components frame)))
+
+(define (write-q-tables port q-tables)
+  (vector-for-each
+   (lambda (i table)
+     (when table
+       (put-u16 port #xffdb) ; DQT.
+       (let ((len (+ 3 64)))
+         (put-u16 port len))
+       (let ((P 0)
+             (T i))
+         (put-u8 port (logior (ash P 4) T)))
+       (let lp ((i 0))
+         (when (< i 64)
+           (let ((i (bytevector-u8-ref normal-order i)))
+             (put-u8 port (vector-ref table i)))
+           (lp (1+ i))))))
+   q-tables))
+
+(define (write-huffman-tables port huffman-tables)
+  (define (write-table k table Tc)
+    (match table
+      (#f #f)
+      (#(size-counts size-offsets
+         values value-indexes sizes codes max-codes)
+       (put-u16 port #xffc4)            ; DHT.
+       (let ((len (+ 19 (bytevector-length values))))
+         (put-u16 port len))
+       (put-u8 port (logior (ash Tc 4) k))
+       (put-bytevector port size-counts)
+       (put-bytevector port values))))
+  (match huffman-tables
+    (#(dc-tables ac-tables)
+     (vector-for-each (lambda (k table) (write-table k table 0))
+                      dc-tables)
+     (vector-for-each (lambda (k table) (write-table k table 1))
+                      ac-tables))))
+
+(define (write-baseline-scan-header port frame)
+  (put-u16 port #xffda) ; SOS.
+  (let ((len (+ 6 (* (frame-component-count frame) 2))))
+    (put-u16 port len))
+  (put-u8 port (frame-component-count frame))
+  (vector-for-each
+   (lambda (k component)
+     (let ((Td (if (zero? k) 0 1))
+           (Ta (if (zero? k) 0 1)))
+       (put-u8 port (component-id component))
+       (put-u8 port (logior (ash Td 4) Ta))))
+   (frame-components frame))
+  (let ((Ss 0)
+        (Se 63)
+        (Ah 0)
+        (Al 0))
+    (put-u8 port Ss)
+    (put-u8 port Se)
+    (put-u8 port (logior (ash Ah 4) Al))))
+
+(define (put-u8/stuff port u8)
+  (put-u8 port u8)
+  (when (eqv? u8 #xff)
+    (put-u8 port 0)))
+
+(define (flush-bit-port bit-port)
+  (match bit-port
+    (#(count bits port)
+     (unless (zero? count)
+       ;; Pad remaining bits with 1, and stuff as needed.
+       (let ((bits (logand #xff (logior (ash -1 count) bits))))
+         (put-u8/stuff port bits))
+       (vector-set! bit-port 0 0)
+       (vector-set! bit-port 1 0)))))
+
+(define (put-bits bit-port bits len)
+  (cond
+   ((negative? bits)
+    (put-bits bit-port (- bits (1+ (ash -1 len))) len))
+   (else
+    (match bit-port
+      (#(count buf port)
+       (let lp ((count count) (buf buf) (bits bits) (len len))
+         (cond
+          ((< (+ count len) 8)
+           (vector-set! bit-port 0 (+ count len))
+           (vector-set! bit-port 1 (logior (ash buf len) bits)))
+          (else
+           (let* ((head-len (- 8 count))
+                  (head-bits (logand (ash bits (- head-len len))
+                                     (1- (ash 1 head-len))))
+                  (tail-len (- len head-len))
+                  (tail-bits (logand bits (1- (ash 1 tail-len)))))
+             (put-u8/stuff port (logior (ash buf head-len) head-bits))
+             (lp 0 0 tail-bits tail-len))))))))))
+
+(define (write-baseline-entropy-coded-data port codes huffman-tables)
+  (let ((port (make-bit-port port)))
+    (match huffman-tables
+      (#(dc-tables ac-tables)
+       (define (write-code code table)
+         (match table
+           (#(size-counts size-offsets
+              values value-indexes sizes codes max-codes)
+            (let* ((u8 (logand code #xff))
+                   (diff (ash code -8))
+                   (ssss (logand code #xf))
+                   (code-index (vector-ref value-indexes u8))
+                   (code (vector-ref codes code-index))
+                   (size (bytevector-u8-ref sizes code-index)))
+              (put-bits port code size)
+              (unless (zero? ssss)
+                (put-bits port diff ssss))))))
+       (define (write-codes codes idx)
+         (let ((dc-table (vector-ref dc-tables idx))
+               (ac-table (vector-ref ac-tables idx)))
+           (match codes
+             ((dc . ac)
+              (write-code dc dc-table)
+              (for-each (lambda (ac) (write-code ac ac-table)) ac)))))
+       (array-for-each-value
+        (lambda (mcu)
+          (vector-for-each
+           (lambda (k blocks)
+             (for-each
+              (lambda (codes)
+                (let ((idx (if (zero? k) 0 1)))
+                  (write-codes codes idx)))
+              blocks))
+           mcu))
+        codes)
+       (flush-bit-port port)))))
+
+(define (write-eoi port)
+  (put-u16 port #xffd9)) ; EOI.
+
+(define (write-jpeg port parsed)
+  (match parsed
+    ((frame misc mcu-array)
+     (let* ((q-tables (q-tables-for-mcu-array mcu-array))
+            (codes (encode-frame parsed q-tables))
+            (frequencies (compute-code-frequencies codes))
+            (huffman-tables (compute-huffman-code-tables frequencies)))
+       (write-soi port)
+       (for-each (lambda (misc) (write-misc-segment port misc)) misc)
+       (write-baseline-frame port frame)
+       (write-q-tables port q-tables)
+       (write-huffman-tables port huffman-tables)
+       (write-baseline-scan-header port frame)
+       (write-baseline-entropy-coded-data port codes huffman-tables)
+       (write-eoi port)))))
