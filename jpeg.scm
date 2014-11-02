@@ -147,6 +147,42 @@
        (error "Bad Pq value" Pq)))
     (vector-set! q-tables Tq table)))
 
+(define (compute-huffman-codes size-counts values)
+  (let* ((count (bytevector-length values))
+         (size-offsets (make-vector 16 #f))
+         (sizes (make-bytevector count 0))
+         (codes (make-vector count #f))
+         (value-indexes (make-vector 256 #f))
+         (max-codes (make-vector 16 -1)))
+    ;; A reverse map from value to index.
+    (array-for-each
+     (lambda (i value)
+       (vector-set! value-indexes value i))
+     values)
+    ;; Compute sizes for each value.
+    (let lp ((size 0) (offset 0))
+      (when (< size 16)
+        (vector-set! size-offsets size offset)
+        (let ((size-count (bytevector-u8-ref size-counts size)))
+          (let lp ((i 0))
+            (when (< i size-count)
+              (bytevector-u8-set! sizes (+ offset i) (1+ size))
+              (lp (1+ i))))
+          (lp (1+ size) (+ offset size-count)))))
+    ;; Compute codes.  This is the algorithm from Annex C, verbatim.
+    (let lp ((k 0) (code 0) (si (bytevector-u8-ref sizes 0)))
+      (vector-set! max-codes (1- si) code)
+      (vector-set! codes k code)
+      (let ((code (1+ code)) (k (1+ k)))
+        (when (< k (bytevector-length sizes))
+          (let lp2 ((code code) (si si))
+            (if (= (bytevector-u8-ref sizes k) si)
+                (lp k code si)
+                (lp2 (ash code 1) (1+ si)))))))
+    ;; Done.
+    (vector size-counts size-offsets
+            values value-indexes sizes codes max-codes)))
+
 (define (read-huffman-table port len dc-tables ac-tables)
   (unless (>= len 19)
     (error "Invalid DHT segment length" len))
@@ -159,44 +195,17 @@
       (error "Bad Th value" Th))
     (unless (= len (+ 19 count))
       (error "Invalid DHT segment length" len))
-    (let ((size-offsets (make-vector 16 #f))
-          (values (read-bytes port count))
-          (sizes (make-bytevector count 0))
-          (codes (make-vector count #f))
-          (max-codes (make-vector 16 -1)))
-      ;; Compute sizes for each value.
-      (let lp ((size 0) (offset 0))
-        (when (< size 16)
-          (vector-set! size-offsets size offset)
-          (let ((size-count (bytevector-u8-ref size-counts size)))
-            (let lp ((i 0))
-              (when (< i size-count)
-                (bytevector-u8-set! sizes (+ offset i) (1+ size))
-                (lp (1+ i))))
-            (lp (1+ size) (+ offset size-count)))))
-      ;; Compute codes.  This is the algorithm from Annex C, verbatim.
-      (let lp ((k 0) (code 0) (si (bytevector-u8-ref sizes 0)))
-        (vector-set! max-codes (1- si) code)
-        (vector-set! codes k code)
-        (let ((code (1+ code)) (k (1+ k)))
-          (cond
-           ((< k (bytevector-length sizes))
-            (let lp2 ((code code) (si si))
-              (if (= (bytevector-u8-ref sizes k) si)
-                  (lp k code si)
-                  (lp2 (ash code 1) (1+ si)))))
-           (else
-            (let ((table (vector size-counts size-offsets values
-                                 sizes codes max-codes)))
-              ;; Done.
-              (match Tc
-                (0 (vector-set! dc-tables Th table))
-                (1 (vector-set! ac-tables Th table))
-                (_ (error "Bad Tc value" Tc)))))))))))
+    (let* ((values (read-bytes port count))
+           (table (compute-huffman-codes size-counts values)))
+      (match Tc
+        (0 (vector-set! dc-tables Th table))
+        (1 (vector-set! ac-tables Th table))
+        (_ (error "Bad Tc value" Tc))))))
 
 (define (print-huffman-table table)
   (match table
-    (#(size-counts size-offsets values sizes codes max-codes)
+    (#(size-counts size-offsets
+       values value-indexes sizes codes max-codes)
      (let lp ((n 0))
        (when (< n (bytevector-length values))
          (let ((si (bytevector-u8-ref sizes n))
@@ -443,7 +452,8 @@
 (define (read-huffman-value bit-port table)
   ;(print-huffman-table table)
   (match table
-    (#(size-counts size-offsets values sizes codes max-codes)
+    (#(size-counts size-offsets
+       values value-indexes sizes codes max-codes)
      (let lp ((size-idx 0) (code (read-bit bit-port)))
        (cond
         ((<= code (vector-ref max-codes size-idx))
