@@ -30,6 +30,7 @@
   #:use-module (rnrs bytevectors)
   #:use-module (jpeg exif)
   #:use-module (jpeg array)
+  #:use-module (jpeg bit-ports)
   #:export (jpeg-dimensions
             jpeg-dimensions-and-exif))
 
@@ -417,37 +418,6 @@
          (list (component-samp-y component) (component-samp-x component))))
       (frame-components frame)))
    (list (frame-mcu-height frame) (frame-mcu-width frame))))
-
-(define (make-bit-port port)
-  ;; Bit count, values, and the port
-  (vector 0 0 port))
-
-(define-inlinable (read-bits bit-port n)
-  (match bit-port
-    (#(count bits port)
-     (let lp ((count count) (bits bits))
-       (cond
-        ((<= n count)
-         (vector-set! bit-port 0 (- count n))
-         (logand (ash bits (- n count)) (1- (ash 1 n))))
-        (else
-         (let* ((u8 (read-u8 port))
-                ;; We never need more than 16 bits in the buffer.
-                (bits (+ (logand (ash bits 8) #xffff) u8)))
-           (when (= u8 #xff)
-             (unless (zero? (read-u8 port))
-               (error "Found marker while reading bits")))
-           (vector-set! bit-port 1 bits)
-           (lp (+ count 8) bits))))))))
-
-(define (read-bit bit-port)
-  (read-bits bit-port 1))
-
-(define (read-signed-bits bit-port n)
-  (let ((bits (read-bits bit-port n)))
-    (if (< bits (ash 1 (1- n)))
-        (+ (ash -1 n) 1 bits)
-        bits)))
 
 (define (read-huffman-value bit-port table)
   ;(print-huffman-table table)
@@ -1478,42 +1448,6 @@
     (put-u8 port Se)
     (put-u8 port (logior (ash Ah 4) Al))))
 
-(define (put-u8/stuff port u8)
-  (put-u8 port u8)
-  (when (eqv? u8 #xff)
-    (put-u8 port 0)))
-
-(define (flush-bit-port bit-port)
-  (match bit-port
-    (#(count bits port)
-     (unless (zero? count)
-       ;; Pad remaining bits with 1, and stuff as needed.
-       (let ((bits (logand #xff (logior (ash -1 count) bits))))
-         (put-u8/stuff port bits))
-       (vector-set! bit-port 0 0)
-       (vector-set! bit-port 1 0)))))
-
-(define (put-bits bit-port bits len)
-  (cond
-   ((negative? bits)
-    (put-bits bit-port (- bits (1+ (ash -1 len))) len))
-   (else
-    (match bit-port
-      (#(count buf port)
-       (let lp ((count count) (buf buf) (bits bits) (len len))
-         (cond
-          ((< (+ count len) 8)
-           (vector-set! bit-port 0 (+ count len))
-           (vector-set! bit-port 1 (logior (ash buf len) bits)))
-          (else
-           (let* ((head-len (- 8 count))
-                  (head-bits (logand (ash bits (- head-len len))
-                                     (1- (ash 1 head-len))))
-                  (tail-len (- len head-len))
-                  (tail-bits (logand bits (1- (ash 1 tail-len)))))
-             (put-u8/stuff port (logior (ash buf head-len) head-bits))
-             (lp 0 0 tail-bits tail-len))))))))))
-
 (define (write-baseline-entropy-coded-data port codes huffman-tables)
   (let ((port (make-bit-port port)))
     (match huffman-tables
@@ -1549,7 +1483,7 @@
               blocks))
            mcu))
         codes)
-       (flush-bit-port port)))))
+       (flush-bits port)))))
 
 (define (write-eoi port)
   (put-u16 port #xffd9)) ; EOI.
