@@ -31,6 +31,7 @@
   #:use-module (jpeg exif)
   #:use-module (jpeg array)
   #:use-module (jpeg bit-ports)
+  #:use-module (jpeg pixbufs)
   #:export (jpeg-dimensions
             jpeg-dimensions-and-exif))
 
@@ -662,29 +663,13 @@
           (lp (1+ j))))
       (lp (1+ i) (+ pos stride)))))
 
-(define-record-type <yuv>
-  (make-yuv width height canvas-width canvas-height planes)
-  yuv?
-  (width yuv-width)
-  (height yuv-height)
-  (canvas-width yuv-canvas-width)
-  (canvas-height yuv-canvas-height)
-  (planes yuv-planes))
-
-(define-record-type <plane>
-  (make-plane width height samples)
-  plane?
-  (width plane-width)
-  (height plane-height)
-  (samples plane-samples))
-
 ;; It's really Y' Cb Cr.  Don't tell Poynton.
-(define (decode-jpeg-to-yuv parsed)
+(define (decode-jpeg-to-planar-image parsed)
   (match parsed
     ((frame misc-segments mcu-array)
      (let ((mcu-width (frame-mcu-width frame))
            (mcu-height (frame-mcu-height frame)))
-       (make-yuv
+       (make-planar-image
         (frame-x frame)
         (frame-y frame)
         (* mcu-width (frame-samp-x frame) 8)
@@ -712,305 +697,14 @@
              (make-plane sample-width sample-height plane)))
          (frame-components frame)))))))
 
-(define (expand-width-by-two/centered in width height)
-  (let* ((out (make-bytevector (* width 2 height) 0)))
-    (let lp ((i 0))
-      (when (< i height)
-        (let ((in-pos (* i width))
-              (out-pos (* i width 2)))
-          ;; Special case for first column.
-          (let* ((j 0)
-                 (in (bytevector-u8-ref in (+ in-pos j))))
-            (bytevector-u8-set! out (+ out-pos 0) in))
-          (let lp ((j 0))
-            (when (< j (1- width))
-              ;; (3x + y + 2) >> 2 is the same as 3x/4 + y/4.  Since
-              ;; we're dealing with integers though, we don't want to
-              ;; introduce bias by having all 0.5 values round to 1, so
-              ;; we add 1 or 2 to the value being shifted, alternating
-              ;; by row.
-              (let* ((in- (bytevector-u8-ref in (+ in-pos j)))
-                     (in+ (bytevector-u8-ref in (+ in-pos (1+ j))))
-                     (out- (ash (+ (* 3 in-) in+ 2) -2))
-                     (out+ (ash (+ in- (* 3 in+) 1) -2)))
-                (bytevector-u8-set! out (+ out-pos j j 1) out-)
-                (bytevector-u8-set! out (+ out-pos j j 2) out+)
-                (lp (+ j 1)))))
-          ;; Special case for last column.
-          (let* ((j (1- width))
-                 (in (bytevector-u8-ref in (+ in-pos j))))
-            (bytevector-u8-set! out (+ out-pos width width -1) in)))
-        (lp (1+ i))))
-    out))
-
-(define (expand-height-by-two/centered in width height)
-  (let* ((out (make-bytevector (* width 2 height) 0)))
-    ;; Special case for first row.
-    (let lp ((j 0))
-      (when (< j width)
-        (let ((in (bytevector-u8-ref in j)))
-          (bytevector-u8-set! out j in)
-          (lp (1+ j)))))
-    ;; The height-1 spaces between samples.
-    (let lp ((i 0))
-      (when (< i (1- height))
-        (let ((in-pos (* i width))
-              (out-pos (+ width (* i 2 width))))
-          (let lp ((j 0))
-            (when (< j width)
-              (let* ((in- (bytevector-u8-ref in (+ in-pos j)))
-                     (in+ (bytevector-u8-ref in (+ in-pos width j)))
-                     ;; Interpolate output; see comment in previous
-                     ;; function.
-                     (out- (ash (+ (* 3 in-) in+ 2) -2))
-                     (out+ (ash (+ in- (* 3 in+) 1) -2)))
-                (bytevector-u8-set! out (+ out-pos j) out-)
-                (bytevector-u8-set! out (+ out-pos width j) out+)
-                (lp (1+ j)))))
-          (lp (1+ i)))))
-    ;; Special case for the last row.
-    (let* ((i (1- height))
-           (in-pos (* i width))
-           (out-pos (+ width (* i 2 width))))
-      (let lp ((j 0))
-        (when (< j width)
-          (let ((in (bytevector-u8-ref in (+ in-pos j))))
-            (bytevector-u8-set! out (+ out-pos j) in)
-            (lp (1+ j))))))
-    out))
-
-(define (upsample-4:2:2 width height y-width y-height y cb cr)
-  (define (expand in)
-    (expand-width-by-two/centered in (/ y-width 2) y-height))
-  (make-yuv width height y-width y-height
-            (vector (make-plane y-width y-height y)
-                    (make-plane y-width y-height (expand cb))
-                    (make-plane y-width y-height (expand cr)))))
-
-(define (upsample-4:2:0 width height y-width y-height y cb cr)
-  (define (expand in)
-    (expand-height-by-two/centered in (/ y-width 2) (/ y-height 2)))
-  (upsample-4:2:2 width height y-width y-height y (expand cb) (expand cr)))
-
-(define (convert-yuv out width height stride y cb cr y-stride)
-  (let lp ((i 0))
-    (when (< i height)
-      (let lp ((j 0) (in-pos (* i y-stride)) (out-pos (* i stride)))
-        (when (< j width)
-          (let ((y (bytevector-u8-ref y in-pos))
-                (cb (- (bytevector-u8-ref cb in-pos) 128))
-                (cr (- (bytevector-u8-ref cr in-pos) 128)))
-            (define (->u8 x)
-              (cond ((< x 0) 0)
-                    ((> x 255) 255)
-                    (else (inexact->exact (round x)))))
-            ;; See ITU recommendataion ITU-T T.871, "JPEG File
-            ;; Interchange Format (JFIF)", section 7.
-            (let ((r (->u8 (+ y (* 1.402 cr))))
-                  (g (->u8 (- y (/ (+ (* 0.114 1.772 cb)
-                                      (* 0.299 1.402 cr))
-                                   0.587))))
-                  (b (->u8 (+ y (* 1.772 cb)))))
-              (bytevector-u8-set! out (+ out-pos 0) r)
-              (bytevector-u8-set! out (+ out-pos 1) g)
-              (bytevector-u8-set! out (+ out-pos 2) b)
-              (lp (1+ j) (1+ in-pos) (+ out-pos 3))))))
-      (lp (1+ i)))))
-
-(define* (yuv->rgb yuv #:optional (stride (* (yuv-width yuv) 3)))
-  (match yuv
-    (($ <yuv> width height canvas-width canvas-height planes)
-     (match planes
-       (#(($ <plane> y-width y-height y))
-        (error "greyscale unimplemented"))
-       (#(($ <plane> y-width y-height y)
-          ($ <plane> cb-width cb-height cb)
-          ($ <plane> cr-width cr-height cr))
-        (unless (and (= y-width canvas-width) (= y-height canvas-height))
-          (error "Expected Y' to have same dimensions as canvas"))
-        (let ((rgb (make-bytevector (* height stride) 0)))
-          (match (vector (/ y-width cb-width) (/ y-height cb-height)
-                         (/ y-width cr-width) (/ y-height cr-height))
-            (#(2 2 2 2)                 ; 4:2:0
-             (yuv->rgb (upsample-4:2:0 width height y-width y-height y cb cr)
-                       stride))
-            (#(2 1 2 1) ; 4:2:2
-             (yuv->rgb (upsample-4:2:2 width height y-width y-height y cb cr)
-                       stride))
-            (#(1 1 1 1) ; 4:4:4
-             (unless (<= (* width 3) stride)
-               (error "invalid stride" stride))
-             (let ((out (make-bytevector (* stride height) 0)))
-               (convert-yuv out width height stride y cb cr y-width)
-               out))
-            (#(x y z w) ; ?
-             (error "subsampling unimplemented" x y z w)))))
-       (_ (error "unknown colorspace"))))))
-
-(define (pad-rgb-horizontally rgb width height stride new-width)
-  (let* ((new-stride (* new-width 3))
-         (out (make-bytevector (* new-stride height) 0)))
-    (let lp ((i 0))
-      (when (< i height)
-        (let ((in-pos (* i stride))
-              (out-pos (* i new-stride)))
-          (bytevector-copy! rgb in-pos out out-pos (* width 3))
-          (let lp ((j (* width 3)))
-            (when (< j new-stride)
-              (let ((x (bytevector-u8-ref out (+ out-pos j -3))))
-                (bytevector-u8-set! out (+ out-pos j) x)
-                (lp (1+ j))))))
-        (lp (1+ i))))
-    out))
-
-(define (pad-rgb-vertically rgb width height stride new-height)
-  (let* ((new-stride (* width 3))
-         (out (make-bytevector (* new-stride new-height) 0)))
-    (let lp ((i 0))
-      (when (< i height)
-        (let ((in-pos (* i stride))
-              (out-pos (* i new-stride)))
-          (bytevector-copy! rgb in-pos out out-pos (* width 3))
-          (lp (1+ i)))))
-    (let lp ((i height))
-      (when (< i new-height)
-        (let ((prev-pos (* (1- i) new-stride))
-              (out-pos (* i new-stride)))
-          (bytevector-copy! out prev-pos out out-pos new-stride)
-          (lp (1+ i)))))
-    out))
-
-(define (shrink-width-by-two/centered in width height)
-  (let* ((half-width (/ width 2))
-         (out (make-bytevector (* half-width height) 0)))
-    (let lp ((i 0))
-      (when (< i height)
-        (let ((in-pos (* i width))
-              (out-pos (* i half-width)))
-          (let lp ((j 0))
-            (when (< j half-width)
-              (let* ((in- (bytevector-u8-ref in (+ in-pos (* j 2))))
-                     (in+ (bytevector-u8-ref in (+ in-pos (* j 2) 1)))
-                     ;; Dither rounding alternately by column.
-                     (out* (ash (+ in- in+ (logand j 1)) -1)))
-                (bytevector-u8-set! out (+ out-pos j) out*)
-                (lp (1+ j))))))
-        (lp (1+ i))))
-    out))
-
-(define (shrink-height-by-two/centered in width height)
-  (let* ((half-height (/ height 2))
-         (out (make-bytevector (* width half-height) 0)))
-    (let lp ((i 0))
-      (when (< i half-height)
-        (let ((in-pos (* i 2 width))
-              (out-pos (* i width)))
-          (let lp ((j 0))
-            (when (< j width)
-              (let* ((in- (bytevector-u8-ref in (+ in-pos j)))
-                     (in+ (bytevector-u8-ref in (+ in-pos j width)))
-                     ;; Dither rounding alternately by column.
-                     (out* (ash (+ in- in+ (logand j 1)) -1)))
-                (bytevector-u8-set! out (+ out-pos j) out*)
-                (lp (1+ j))))))
-        (lp (1+ i))))
-    out))
-
-(define (convert-rgb rgb width height stride)
-  (let ((y (make-bytevector (* width height)))
-        (cb (make-bytevector (* width height)))
-        (cr (make-bytevector (* width height))))
-    (let lp ((i 0))
-      (when (< i height)
-        (let lp ((j 0) (in-pos (* i stride)) (out-pos (* i width)))
-          (when (< j width)
-            (let ((r (bytevector-u8-ref rgb (+ in-pos 0)))
-                  (g (bytevector-u8-ref rgb (+ in-pos 1)))
-                  (b (bytevector-u8-ref rgb (+ in-pos 2))))
-              (define (->u8 x)
-                (cond ((< x 0) 0)
-                      ((> x 255) 255)
-                      (else (inexact->exact (round x)))))
-              ;; See ITU recommendataion ITU-T T.871, "JPEG File
-              ;; Interchange Format (JFIF)", section 7.
-              (let ((y* (->u8 (+ (* 0.299 r) (* 0.587 g) (* 0.114 b))))
-                    (cb* (->u8 (+ (/ (+ (* -0.299 r) (* -0.587 g) (* 0.886 b))
-                                     1.772)
-                                  128)))
-                    (cr* (->u8 (+ (/ (+ (* 0.701 r) (* -0.587 g) (* -0.114 b))
-                                     1.402)
-                                  128))))
-                (bytevector-u8-set! y out-pos y*)
-                (bytevector-u8-set! cb out-pos cb*)
-                (bytevector-u8-set! cr out-pos cr*)
-                (lp (1+ j) (+ in-pos 3) (1+ out-pos))))))
-        (lp (1+ i))))
-    (values y cb cr)))
-
-(define* (rgb->yuv rgb width height #:key (stride (* width 3))
-                   (samp-x 2) (samp-y 2))
-  (define (round-up x y) (* (ceiling/ x y) y))
-  (let pad ((rgb rgb)
-            (canvas-width width)
-            (canvas-height height)
-            (stride stride))
-    (cond
-     ((not (integer? (/ canvas-width 8 samp-x)))
-      (let ((new-canvas-width (round-up canvas-width (* 8 samp-x))))
-        (pad (pad-rgb-horizontally rgb canvas-width canvas-height stride
-                                   new-canvas-width)
-             new-canvas-width canvas-height (* new-canvas-width 3))))
-     ((not (integer? (/ canvas-height 8 samp-y)))
-      (let ((new-canvas-height (round-up canvas-height (* 8 samp-y))))
-        (pad (pad-rgb-vertically rgb canvas-width canvas-height stride
-                                 new-canvas-height)
-             canvas-width new-canvas-height (* canvas-width 3))))
-     (else
-      (call-with-values (lambda ()
-                          (convert-rgb rgb canvas-width canvas-height stride))
-        (lambda (y cb cr)
-          (let lp ((cb cb) (cr cr)
-                   (samp-width canvas-width) (samp-height canvas-height))
-            (cond
-             ((< canvas-width (* samp-width samp-x))
-              (lp (shrink-width-by-two/centered cb samp-width samp-height)
-                  (shrink-width-by-two/centered cr samp-width samp-height)
-                  (/ samp-width 2)
-                  samp-height))
-             ((< canvas-height (* samp-height samp-y))
-              (lp (shrink-height-by-two/centered cb samp-width samp-height)
-                  (shrink-height-by-two/centered cr samp-width samp-height)
-                  samp-width
-                  (/ samp-height 2)))
-             (else
-              (make-yuv width height canvas-width canvas-height
-                        (vector
-                         (make-plane canvas-width canvas-height y)
-                         (make-plane samp-width samp-height cb)
-                         (make-plane samp-width samp-height cr))))))))))))
-
-(define (write-ppm port rgb width height)
-  (format port "P6\n~a ~a\n255\n" width height)
-  (put-bytevector port rgb))
-
 (define (jpeg->ppm in out)
-  (let ((yuv (decode-jpeg-to-yuv (parse-jpeg in))))
-    (write-ppm (open-output-file out)
-               (yuv->rgb yuv)
-               (yuv-width yuv)
-               (yuv-height yuv))))
-
-(define (write-pgm port y width height)
-  (format port "P5\n~a ~a\n255\n" width height)
-  (put-bytevector port y))
+  (let ((yuv (decode-jpeg-to-planar-image (parse-jpeg in))))
+    (write-ppm (open-output-file out) (yuv->rgb yuv))))
 
 (define (jpeg-plane->pgm in out idx)
-  (let* ((yuv (decode-jpeg-to-yuv (parse-jpeg in)))
-         (plane (vector-ref (yuv-planes yuv) idx)))
-    (write-pgm (open-output-file out)
-               (plane-samples plane)
-               (plane-width plane)
-               (plane-height plane))))
+  (let* ((yuv (decode-jpeg-to-planar-image (parse-jpeg in)))
+         (plane (vector-ref (planar-image-planes yuv) idx)))
+    (write-pgm (open-output-file out) plane)))
 
 ;; Tables K.1 and K.2 from the JPEG specification.
 (define *standard-luminance-q-table*
@@ -1109,7 +803,7 @@
                      ;; components.
                      (plane-q-table (lambda (i) (if (zero? i) 0 1))))
   (match yuv
-    (($ <yuv> width height canvas-width canvas-height planes)
+    (($ <planar-image> width height canvas-width canvas-height planes)
      (define (x-subsampling plane) (/ canvas-width (plane-width plane)))
      (define (y-subsampling plane) (/ canvas-height (plane-height plane)))
      (let ((samp-x (vector-fold* lcm 1 planes #:key x-subsampling))
