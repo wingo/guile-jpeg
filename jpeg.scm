@@ -249,6 +249,13 @@
          (skip-params port)))
       (else marker))))
 
+(define-record-type <jpeg>
+  (make-jpeg frame misc-segments mcu-array)
+  jpeg?
+  (frame jpeg-frame)
+  (misc-segments jpeg-misc-segments)
+  (mcu-array jpeg-mcu-array))
+
 (define-record-type <frame>
   (make-frame marker precision y x components samp-x samp-y)
   frame?
@@ -532,19 +539,17 @@
       (lambda (image-params sof)
         (let* ((frame (read-frame-header port sof))
                (dest (allocate-dct-matrix frame)))
-          (list frame
-                (misc-segments image-params)
-                (let lp ((params image-params))
-                  (call-with-values (lambda () (read-params port params))
-                    (lambda (scan-params marker)
-                      (case marker
-                        ((#xffd9)       ; EOI
-                         dest)
-                        ((#xffda)       ; SOS
-                         (read-scan port frame scan-params dest)
-                         (lp scan-params))
-                        (else
-                         (error "Unexpected marker" marker))))))))))))
+          (let lp ((params image-params) (misc (misc-segments image-params)))
+            (call-with-values (lambda () (read-params port params))
+              (lambda (scan-params marker)
+                (case marker
+                  ((#xffd9)             ; EOI
+                   (make-jpeg frame misc dest))
+                  ((#xffda)             ; SOS
+                   (read-scan port frame scan-params dest)
+                   (lp scan-params (append misc (misc-segments scan-params))))
+                  (else
+                   (error "Unexpected marker" marker)))))))))))
 
 (define fdct-coefficients
   (eval-at-compile-time
@@ -601,9 +606,9 @@
       (lp (1+ i) (+ pos stride)))))
 
 ;; It's really Y' Cb Cr.  Don't tell Poynton.
-(define (decode-jpeg-to-planar-image parsed)
-  (match parsed
-    ((frame misc-segments mcu-array)
+(define (decode-jpeg-to-planar-image jpeg)
+  (match jpeg
+    (($ <jpeg> frame misc-segments mcu-array)
      (let ((mcu-width (frame-mcu-width frame))
            (mcu-height (frame-mcu-height frame)))
        (make-planar-image
@@ -757,7 +762,7 @@
                         (samp-y (plane-samp-y plane)))
                    (make-component i i samp-x samp-y (plane-q-table i))))
                (array-dimensions planes))))
-         (list
+         (make-jpeg
           (make-frame #f 8 height width components samp-x samp-y)
           '()
           (array-unfold
@@ -814,7 +819,7 @@
               (cons (encode-dc (- dc prev-dc))
                     (reverse (encode-next 1 '())))))))
 
-(define (encode-frame parsed q-tables)
+(define (encode-frame jpeg q-tables)
   (define (compute-scan-components frame mcu-array)
     (array-map-values
      (lambda (component)
@@ -822,8 +827,8 @@
          ;; We don't know the dc and ac huffman tables yet.
          (vector component 0 q-table #f #f)))
      (frame-components frame)))
-  (match parsed
-    ((frame misc mcu-array)
+  (match jpeg
+    (($ <jpeg> frame misc mcu-array)
      (let ((scan-components (compute-scan-components frame mcu-array)))
        (array-map-values
         (lambda (mcu)
@@ -1006,11 +1011,11 @@
 (define (write-eoi port)
   (put-u16 port #xffd9)) ; EOI.
 
-(define (write-jpeg port parsed)
-  (match parsed
-    ((frame misc mcu-array)
+(define (write-jpeg port jpeg)
+  (match jpeg
+    (($ <jpeg> frame misc mcu-array)
      (let* ((q-tables (q-tables-for-mcu-array mcu-array))
-            (codes (encode-frame parsed q-tables))
+            (codes (encode-frame jpeg q-tables))
             (frequencies (compute-code-frequencies codes))
             (huffman-tables (compute-huffman-code-tables frequencies)))
        (write-soi port)
