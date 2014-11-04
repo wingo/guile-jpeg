@@ -14,7 +14,8 @@ SOURCES = \
 	jpeg.scm
 
 TESTS = 					\
-	tests/basic.scm
+	tests/basic.scm				\
+	tests/parse.scm
 TESTS_ENVIRONMENT = $(abs_top_builddir)/env $(GUILE) --no-auto-compile
 
 EXTRA_DIST += \

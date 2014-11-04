@@ -104,7 +104,8 @@
     (#(count bits port)
      (unless (zero? count)
        ;; Pad remaining bits with 1, and stuff as needed.
-       (let ((bits (logand #xff (logior (ash -1 count) bits))))
+       (let ((bits (logior (ash bits (- 8 count))
+                           (1- (ash 1 (- 8 count))))))
          (put-u8/stuff port bits))
        (vector-set! bit-port 0 0)
        (vector-set! bit-port 1 0)))))
