@@ -8,6 +8,7 @@ SOURCES = \
 	jpeg/bit-ports.scm \
 	jpeg/exif.scm \
 	jpeg/huffman.scm \
+	jpeg/jfif.scm \
 	jpeg/pixbufs.scm \
 	jpeg.scm
 
