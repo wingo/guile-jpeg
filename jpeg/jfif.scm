@@ -516,28 +516,40 @@
          (else (error "Unsupported frame type" frame)))))))
 
 (define* (read-jpeg port #:key (with-body? #t) (with-misc-sections? #t))
-  (read-soi port)
-  (call-with-values (lambda ()
-                      (read-params port *initial-params* with-misc-sections?))
-    (lambda (image-params sof)
-      (let* ((frame (read-frame-header port sof))
-             (dest (allocate-dct-matrix frame)))
-        (let lp ((params image-params) (misc (misc-segments image-params)))
-          (call-with-values (lambda ()
-                              (read-params port params with-misc-sections?))
-            (lambda (scan-params marker)
-              (case marker
-                ((#xffd9)             ; EOI
-                 (make-jpeg frame misc dest))
-                ((#xffda)             ; SOS
-                 (cond
-                  (with-body?
-                   (read-scan port frame scan-params dest)
-                   (lp scan-params (append misc (misc-segments scan-params))))
+  (cond
+   ((string? port)
+    (call-with-input-file port
+      (lambda (port)
+        (read-jpeg port
+                   #:with-body? with-body?
+                   #:with-misc-sections? with-misc-sections?))))
+   ((bytevector? port)
+    (read-jpeg (open-bytevector-input-port port)
+               #:with-body? with-body?
+               #:with-misc-sections? with-misc-sections?))
+   (else
+    (read-soi port)
+    (call-with-values (lambda ()
+                        (read-params port *initial-params* with-misc-sections?))
+      (lambda (image-params sof)
+        (let* ((frame (read-frame-header port sof))
+               (dest (allocate-dct-matrix frame)))
+          (let lp ((params image-params) (misc (misc-segments image-params)))
+            (call-with-values (lambda ()
+                                (read-params port params with-misc-sections?))
+              (lambda (scan-params marker)
+                (case marker
+                  ((#xffd9)             ; EOI
+                   (make-jpeg frame misc dest))
+                  ((#xffda)             ; SOS
+                   (cond
+                    (with-body?
+                     (read-scan port frame scan-params dest)
+                     (lp scan-params (append misc (misc-segments scan-params))))
+                    (else
+                     (make-jpeg frame misc dest))))
                   (else
-                   (make-jpeg frame misc dest))))
-                (else
-                 (error "Unexpected marker" marker))))))))))
+                   (error "Unexpected marker" marker))))))))))))
 
 (define (q-tables-for-mcu-array mcu-array)
   (define (gcd* coeff q) (gcd (abs coeff) q))
@@ -598,7 +610,7 @@
                     (reverse (encode-next 1 '())))))))
 
 (define (compute-code-sequences jpeg)
-  (define (compute-scan-components frame mcu-array)
+  (define (compute-scan-components frame q-tables)
     (array-map-values
      (lambda (component)
        (let ((q-table (vector-ref q-tables (component-q-table component))))
@@ -607,8 +619,8 @@
      (frame-components frame)))
   (match jpeg
     (($ <jpeg> frame misc mcu-array)
-     (let ((scan-components (compute-scan-components frame mcu-array))
-           (q-tables (q-tables-for-mcu-array mcu-array)))
+     (let* ((q-tables (q-tables-for-mcu-array mcu-array))
+            (scan-components (compute-scan-components frame q-tables)))
        (values
         q-tables
         (array-map-values
@@ -794,17 +806,22 @@
   (put-u16 port #xffd9)) ; EOI.
 
 (define (write-jpeg port jpeg)
-  (match jpeg
-    (($ <jpeg> frame misc mcu-array)
-     (call-with-values (lambda () (compute-code-sequences jpeg))
-       (lambda (q-tables codes)
-         (let* ((frequencies (compute-code-frequencies codes))
-                (huffman-tables (compute-huffman-code-tables frequencies)))
-           (write-soi port)
-           (for-each (lambda (misc) (write-misc-segment port misc)) misc)
-           (write-baseline-frame port frame)
-           (write-q-tables port q-tables)
-           (write-huffman-tables port huffman-tables)
-           (write-baseline-scan-header port frame)
-           (write-baseline-entropy-coded-data port codes huffman-tables)
-           (write-eoi port)))))))
+  (cond
+   ((string? port)
+    (call-with-output-file port
+      (lambda (port) (write-jpeg port jpeg))))
+   (else
+    (match jpeg
+      (($ <jpeg> frame misc mcu-array)
+       (call-with-values (lambda () (compute-code-sequences jpeg))
+         (lambda (q-tables codes)
+           (let* ((frequencies (compute-code-frequencies codes))
+                  (huffman-tables (compute-huffman-code-tables frequencies)))
+             (write-soi port)
+             (for-each (lambda (misc) (write-misc-segment port misc)) misc)
+             (write-baseline-frame port frame)
+             (write-q-tables port q-tables)
+             (write-huffman-tables port huffman-tables)
+             (write-baseline-scan-header port frame)
+             (write-baseline-entropy-coded-data port codes huffman-tables)
+             (write-eoi port)))))))))

@@ -26,7 +26,10 @@
   #:use-module (srfi srfi-9)
   #:use-module (rnrs bytevectors)
   #:use-module (jpeg array)
-  #:export (make-planar-image
+  #:export (;; FIXME: These constructors should verify that the
+            ;; parameters are valid (e.g. that plane width and height
+            ;; agree with the size of the samples array)
+            make-planar-image
             <planar-image> planar-image?
             planar-image-width planar-image-height
             planar-image-canvas-width planar-image-canvas-height

@@ -32,13 +32,16 @@
   #:use-module (jpeg jfif)
   #:use-module (jpeg pixbufs)
   #:export (jpeg-dimensions
-            jpeg-dimensions-and-exif))
+            jpeg-dimensions-and-exif
+            jpeg->rgb
+            rgb->jpeg)
+  #:re-export (read-jpeg write-jpeg))
 
 
-(define (jpeg-dimensions file)
-  (let* ((jpeg (call-with-input-file file
-                 (lambda (port)
-                   (read-jpeg port #:with-body? #f #:with-misc-sections? #f))))
+(define (jpeg-dimensions jpeg)
+  (let* ((jpeg (if (jpeg? jpeg)
+                   jpeg
+                   (read-jpeg jpeg #:with-body? #f #:with-misc-sections? #f)))
          (frame (jpeg-frame jpeg)))
     (values (frame-x frame)
             (frame-y frame))))
@@ -62,10 +65,10 @@
                      (parse-exif (bv-suffix (misc-bytes misc) 6))))
               misc-segments))
 
-(define (jpeg-dimensions-and-exif file)
-  (let* ((jpeg (call-with-input-file file
-                 (lambda (port)
-                   (read-jpeg port #:with-body? #f))))
+(define (jpeg-dimensions-and-exif jpeg)
+  (let* ((jpeg (if (jpeg? jpeg)
+                   jpeg
+                   (read-jpeg jpeg #:with-body? #f)))
          (frame (jpeg-frame jpeg)))
     (values (frame-x frame)
             (frame-y frame)
@@ -74,16 +77,18 @@
               (((main)) main)
               (_ '())))))
 
-(define (->input-port in)
-  (if (string? in)
-      (open-input-file in)
-      in))
+(define* (jpeg->rgb in #:key (stride-for-width
+                              (lambda (width) (* width 3))))
+  (let ((jpeg (if (jpeg? in) in (read-jpeg in))))
+    (yuv->rgb (jpeg->planar-image jpeg)
+              (stride-for-width (frame-x (jpeg-frame jpeg))))))
 
-(define (jpeg->ppm in out)
-  (let ((yuv (jpeg->planar-image (read-jpeg (->input-port in)))))
-    (write-ppm (open-output-file out) (yuv->rgb yuv))))
-
-(define (jpeg-plane->pgm in out idx)
-  (let* ((yuv (jpeg->planar-image (read-jpeg (->input-port in))))
-         (plane (vector-ref (planar-image-planes yuv) idx)))
-    (write-pgm (open-output-file out) plane)))
+(define rgb->jpeg
+  (case-lambda*
+   ((rgb #:key (samp-x 2) (samp-y 2) (quality 85))
+    (planar-image->jpeg (rgb->yuv rgb #:samp-x samp-x #:samp-y samp-y)
+                        #:quality quality))
+   ((buffer width height #:key (stride (* width 3))
+            (samp-x 2) (samp-y 2) (quality 85))
+    (rgb->jpeg (make-interleaved-image width height 3 stride buffer)
+               #:samp-x samp-x #:samp-y samp-y #:quality quality))))
