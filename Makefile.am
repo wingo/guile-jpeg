@@ -6,6 +6,7 @@ godir=$(libdir)/guile/$(GUILE_EFFECTIVE_VERSION)/ccache
 SOURCES = \
 	jpeg/array.scm \
 	jpeg/bit-ports.scm \
+	jpeg/dct.scm \
 	jpeg/exif.scm \
 	jpeg/huffman.scm \
 	jpeg/jfif.scm \
