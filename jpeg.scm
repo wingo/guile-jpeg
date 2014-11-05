@@ -77,11 +77,14 @@
               (((main)) main)
               (_ '())))))
 
-(define* (jpeg->rgb in #:key (stride-for-width
-                              (lambda (width) (* width 3))))
+(define* (jpeg->rgb in #:key
+                    (argb? #f)
+                    (stride-for-width
+                     (lambda (width) (* width (if argb? 4 3)))))
   (let ((jpeg (if (jpeg? in) in (read-jpeg in))))
     (yuv->rgb (jpeg->planar-image jpeg)
-              (stride-for-width (frame-x (jpeg-frame jpeg))))))
+              #:argb? argb?
+              #:stride (stride-for-width (frame-x (jpeg-frame jpeg))))))
 
 (define rgb->jpeg
   (case-lambda*
@@ -89,6 +92,7 @@
     (planar-image->jpeg (rgb->yuv rgb #:samp-x samp-x #:samp-y samp-y)
                         #:quality quality))
    ((buffer width height #:key (stride (* width 3))
-            (samp-x 2) (samp-y 2) (quality 85))
-    (rgb->jpeg (make-interleaved-image width height 3 stride buffer)
+            (samp-x 2) (samp-y 2) (quality 85) (argb? #f))
+    (rgb->jpeg (make-interleaved-image width height (if argb? 4 3) stride
+                                       buffer)
                #:samp-x samp-x #:samp-y samp-y #:quality quality))))

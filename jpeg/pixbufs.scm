@@ -249,7 +249,49 @@
               (lp (1+ j) (1+ in-pos) (+ out-pos 3))))))
       (lp (1+ i)))))
 
-(define* (yuv->rgb yuv #:optional (stride (* (planar-image-width yuv) 3)))
+;; in and out might be the same
+(define (rgb->argb in out width height in-stride out-stride)
+  (let lp ((i 0))
+    (when (< i height)
+      (let ((in-pos (* i in-stride))
+            (out-pos (* i out-stride)))
+        (let lp ((j (1- width)))
+          (when (<= 0 j)
+            (let ((in-pos (+ in-pos (* 3 j)))
+                  (out-pos (+ out-pos (* 4 j))))
+              (let ((a #xff)
+                    (r (bytevector-u8-ref in (+ in-pos 0)))
+                    (g (bytevector-u8-ref in (+ in-pos 1)))
+                    (b (bytevector-u8-ref in (+ in-pos 2))))
+                (let ((argb (logior (ash a 24)
+                                    (ash r 16)
+                                    (ash g 8)
+                                    (ash b 0))))
+                  (bytevector-u32-native-set! out out-pos argb))
+                (lp (1- j)))))))
+      (lp (1+ i)))))
+
+(define (argb->rgb in out width height in-stride out-stride)
+  (let lp ((i 0))
+    (when (< i height)
+      (let ((in-pos (* i in-stride))
+            (out-pos (* i out-stride)))
+        (let lp ((j 0))
+          (when (< j width)
+            (let ((in-pos (+ in-pos (* 4 j)))
+                  (out-pos (+ out-pos (* 3 j))))
+              (let ((r (bytevector-u8-ref in (+ in-pos 1)))
+                    (g (bytevector-u8-ref in (+ in-pos 2)))
+                    (b (bytevector-u8-ref in (+ in-pos 3))))
+                (bytevector-u8-set! out (+ out-pos 0) r)
+                (bytevector-u8-set! out (+ out-pos 1) g)
+                (bytevector-u8-set! out (+ out-pos 2) b)
+                (lp (1+ j)))))))
+      (lp (1+ i)))))
+
+(define* (yuv->rgb yuv #:key
+                   (argb? #f)
+                   (stride (* (planar-image-width yuv) (if argb? 4 3))))
   (match yuv
     (($ <planar-image> width height canvas-width canvas-height planes)
      (match planes
@@ -264,16 +306,19 @@
                        (/ y-width cr-width) (/ y-height cr-height))
           (#(2 2 2 2)                   ; 4:2:0
            (yuv->rgb (upsample-4:2:0 width height y-width y-height y cb cr)
-                     stride))
+                     #:argb? argb? #:stride stride))
           (#(2 1 2 1)                   ; 4:2:2
            (yuv->rgb (upsample-4:2:2 width height y-width y-height y cb cr)
-                     stride))
+                     #:argb? argb? #:stride stride))
           (#(1 1 1 1)                   ; 4:4:4
-           (unless (<= (* width 3) stride)
+           (unless (<= (* width (if argb? 4 3)) stride)
              (error "invalid stride" stride))
            (let ((buffer (make-bytevector (* stride height) 0)))
              (convert-yuv buffer width height stride y cb cr y-width)
-             (make-interleaved-image width height 3 stride buffer)))
+             (when argb?
+               (rgb->argb buffer buffer width height stride stride))
+             (make-interleaved-image width height
+                                     (if argb? 4 3) stride buffer)))
           (#(x y z w)                   ; ?
            (error "subsampling unimplemented" x y z w))))
        (_ (error "unknown colorspace"))))))
@@ -312,6 +357,14 @@
 (define* (rgb->yuv rgb #:key (samp-x 2) (samp-y 2))
   (define (round-up x y) (* (ceiling/ x y) y))
   (match rgb
+    (($ <interleaved-image> width height 4 stride argb)
+     (let* ((new-stride (* width 3))
+            (rgb (make-bytevector (* height new-stride) 0)))
+       (rgb->yuv
+        (make-interleaved-image
+         width height 3 new-stride
+         (argb->rgb argb rgb width height stride new-stride))
+        #:samp-x samp-x #:samp-y samp-y)))
     (($ <interleaved-image> width height 3 stride rgb)
      (let pad ((rgb rgb)
                (canvas-width width)
