@@ -74,11 +74,15 @@
 
 (define (idct-block block plane pos stride)
   (define (idct i j)
-    (array-fold
-     (lambda (k coeff sum)
-       (+ sum (* coeff (vector-ref block k))))
-     (array-ref idct-coefficients i j)
-     0.0))
+    (let ((coeffs (array-ref idct-coefficients i j)))
+      (let lp ((k 0) (sum 0.0))
+        (if (< k 64)
+            (let ((Suv (vector-ref block k)))
+              (lp (1+ k)
+                  (if (zero? Suv)
+                      sum
+                      (+ sum (* (f32vector-ref coeffs k) Suv)))))
+            sum))))
   (let lp ((i 0) (pos pos))
     (when (< i 8)
       (let lp ((j 0))
