@@ -551,7 +551,7 @@
                   (else
                    (error "Unexpected marker" marker))))))))))))
 
-(define (q-tables-for-mcu-array mcu-array)
+(define* (q-tables-for-mcu-array mcu-array #:key (max-value 255))
   (define (gcd* coeff q) (gcd (abs coeff) q))
   (define (meet-tables coeffs q)
     (if q
@@ -570,7 +570,12 @@
                         (array-fold-values meet-tables v q))))))
          mcu-array #f #f))
     (lambda (luma-q chroma-q)
-      (define (fixup q) (if (zero? q) 255 q))
+      (define (fixup q)
+        (cond
+         ((zero? q) 255)
+         ((<= q max-value) q)
+         ((zero? (remainder q 2)) (fixup (/ q 2)))
+         (else (error "q out of range" q))))
       (vector (array-map-values fixup luma-q) (array-map-values fixup chroma-q)
               #f #f))))
 

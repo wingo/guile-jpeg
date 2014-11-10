@@ -3,9 +3,19 @@
 
 (use-modules (jpeg) (jpeg jfif) (jpeg array) (ice-9 match) (srfi srfi-11))
 
-(define *constant-block-coefficients*
-  ;; All coefficients zero == constant middle (128) value.
-  (make-vector 64 0))
+(define (dct-coefficients-for-constant-level-shifted-value value)
+  ;; All AC coefficients zero == constant value.
+  (let ((v (make-vector 64 0)))
+    (vector-set! v 0 (* 1/4 1/2 value 64))
+    v))
+
+(define *replacement-chrominance*
+  ;; Zero.
+  (dct-coefficients-for-constant-level-shifted-value 0))
+
+(define *replacement-luminance*
+  ;; 128, a middle grey.
+  (dct-coefficients-for-constant-level-shifted-value 0))
 
 (define (replace-components frame mcu-array k)
   (let* ((comp (vector-ref (frame-components frame) k))
@@ -32,7 +42,8 @@
                 (let-values (((i i*) (euclidean/ i (component-samp-y comp)))
                              ((j j*) (euclidean/ j (component-samp-x comp))))
                   (array-ref (array-ref (array-ref mcu-array i j) k) i* j*)))
-               (else *constant-block-coefficients*)))
+               ((= k* 0) *replacement-luminance*)
+               (else *replacement-chrominance*)))
             (list 1 1)))
          (list (frame-component-count frame))))
       (list (ceiling/ new-height 8) (ceiling/ new-width 8))))))
