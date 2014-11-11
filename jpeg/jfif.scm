@@ -719,8 +719,8 @@
   (array-for-each-value
    (lambda (component)
      (put-u8 port (component-id component))
-     (put-u8 port (logior (ash (component-samp-y component) 4)
-                          (component-samp-x component)))
+     (put-u8 port (logior (ash (component-samp-x component) 4)
+                          (component-samp-y component)))
      (put-u8 port (component-q-table component)))
    (frame-components frame)))
 
