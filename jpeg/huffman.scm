@@ -182,7 +182,7 @@
            (else
             ;; We have a code that is > 16 bits long.  Reshuffle the
             ;; tree to fit the code into 16 bits.
-            (let lp ((j (1- i)))
+            (let lp ((j (- i 2)))
               (cond
                ((zero? (bytevector-u8-ref size-counts j))
                 (lp (1- j)))
