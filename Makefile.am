@@ -11,6 +11,7 @@ SOURCES = \
 	jpeg/huffman.scm \
 	jpeg/jfif.scm \
 	jpeg/pixbufs.scm \
+	jpeg/transform.scm \
 	jpeg.scm
 
 TESTS = 					\
