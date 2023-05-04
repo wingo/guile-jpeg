@@ -2,7 +2,7 @@ AC_INIT(guile-jpeg, 0.1.0)
 AC_COPYRIGHT([
 
 Guile-JPEG
-Copyright (C) 2014 Andy Wingo
+Copyright (C) 2014, 2023 Andy Wingo
 
 Guile-JPEG is free software: you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -24,7 +24,7 @@ AC_CONFIG_AUX_DIR([build-aux])
 AM_INIT_AUTOMAKE([-Wall -Wno-portability serial-tests])
 AM_SILENT_RULES([yes])
 
-GUILE_PKG([2.2 2.0])
+GUILE_PKG
 GUILE_PROGS
 
 AC_CONFIG_FILES([
